@@ -74,25 +74,32 @@ __device__ __forceinline__ void restrict_op_entry_PRECISION( const cu_cmplx_PREC
 }
 
 
-// one thread per coarse entry phi_c[ i*2*nev + k1*nev + j ]
+// One CUDA block per (aggregate i, spin half k1): blockIdx.x = 2*i + k1 (= output offset / nev).
+// threadIdx.x = test vector j (nev padded to a multiple of 32), threadIdx.y = slice of the rows of the aggregate:
+// each thread sums rows y, y+Y, y+2Y, ...; the Y partial sums are then reduced in shared memory
+// with a fixed tree order (deterministic result).
 template<bool SSE_LAYOUT>
 __global__ void cuda_restrict_PRECISION_kernel( cuda_vector_PRECISION phi_c, const cu_cmplx_PRECISION *phi,
-                                                const cu_cmplx_PRECISION *op, int num_agg, int nev, int npev,
+                                                const cu_cmplx_PRECISION *op, int nev, int npev,
                                                 int agg_sites, size_t vector_size, int S ) {
 
-  int idx = blockIdx.x*blockDim.x + threadIdx.x;
-  if ( idx >= num_agg*2*nev ) return;
+  extern __shared__ __align__(16) unsigned char restrict_smem_PRECISION[];
+  PRECISION *red_re = (PRECISION*) restrict_smem_PRECISION;
+  PRECISION *red_im = red_re + blockDim.x*blockDim.y;
 
-  int j  = idx % nev;
-  int k1 = (idx / nev) % 2;
-  int i  = idx / (2*nev);
+  const int j = threadIdx.x, y = threadIdx.y, X = blockDim.x, Y = blockDim.y;
+  const int i = blockIdx.x / 2, k1 = blockIdx.x % 2;
 
   PRECISION re = 0, im = 0;
 
-  // same summation order as the CPU code: sites k, then parent variables k2
-  for ( int k=0; k<agg_sites; k++ ) {
-    size_t row = ((size_t)i*agg_sites + k)*2*npev + (size_t)k1*npev;
-    for ( int k2=0; k2<npev; k2++, row++ ) {
+  if ( j < nev ) {
+    const int n_rows = agg_sites*npev;
+    // row = ((i*agg_sites + k)*2 + k1)*npev + k2 = row0 + k*2*npev + k2
+    const size_t row0 = (size_t)i*agg_sites*2*npev + (size_t)k1*npev;
+    #pragma unroll 4
+    for ( int r=y; r<n_rows; r+=Y ) {
+      int k = r / npev, k2 = r - k*npev;
+      size_t row = row0 + (size_t)k*2*npev + k2;
       cu_cmplx_PRECISION p = phi[row];
       PRECISION p_re = cu_creal_PRECISION(p), p_im = cu_cimag_PRECISION(p), o_re, o_im;
       restrict_op_entry_PRECISION<SSE_LAYOUT>( op, row, j, nev, vector_size, S, &o_re, &o_im );
@@ -102,7 +109,32 @@ __global__ void cuda_restrict_PRECISION_kernel( cuda_vector_PRECISION phi_c, con
     }
   }
 
-  phi_c[idx] = make_cu_cmplx_PRECISION( re, im );
+  red_re[y*X + j] = re;
+  red_im[y*X + j] = im;
+  __syncthreads();
+
+  for ( int s=Y/2; s>0; s>>=1 ) {
+    if ( y < s ) {
+      red_re[y*X + j] += red_re[(y+s)*X + j];
+      red_im[y*X + j] += red_im[(y+s)*X + j];
+    }
+    __syncthreads();
+  }
+
+  if ( y == 0 && j < nev )
+    phi_c[ (size_t)blockIdx.x*nev + j ] = make_cu_cmplx_PRECISION( red_re[j], red_im[j] );
+}
+
+
+// number of SMs of the current device (queried once)
+static int restrict_num_sms_PRECISION( void ) {
+  static int num_sms = 0;
+  if ( num_sms == 0 ) {
+    int dev;
+    CUDA_CHECK_INTERP( cudaGetDevice( &dev ) );
+    CUDA_CHECK_INTERP( cudaDeviceGetAttribute( &num_sms, cudaDevAttrMultiProcessorCount, dev ) );
+  }
+  return num_sms;
 }
 
 
@@ -114,14 +146,28 @@ static void cuda_restrict_PRECISION_launch( cuda_vector_PRECISION phi_c_gpu, con
   int num_agg   = l->is_PRECISION.num_agg,
       nev       = l->num_eig_vect,
       npev      = l->num_lattice_site_var/2,
-      agg_sites = l->num_inner_lattice_sites / num_agg;
-  size_t n_coarse = (size_t)num_agg*2*nev;
+      agg_sites = l->num_inner_lattice_sites / num_agg,
+      n_rows    = agg_sites*npev;
 
-  int threads_per_block = 128;
-  int nr_blocks = (int)( (n_coarse + threads_per_block - 1) / threads_per_block );
-  cuda_restrict_PRECISION_kernel<SSE_LAYOUT><<< nr_blocks, threads_per_block >>>( phi_c_gpu, phi_gpu, op_gpu, num_agg, nev, npev,
-                                                                                  agg_sites, (size_t)l->vector_size,
-                                                                                  restrict_simd_length_PRECISION() );
+  // block shape: X = nev padded to a multiple of 32, Y = power of 2 with X*Y <= 1024,
+  // at least 4, grown until the grid fills ~2048 threads per SM (or Y reaches the number of rows)
+  int X = ((nev + 31)/32)*32;
+  if ( X > 1024 ) {
+    fprintf( stderr, "cuda_restrict_PRECISION: num_eig_vect=%d too large for one block\n", nev );
+    MPI_Abort( MPI_COMM_WORLD, 1 );
+  }
+  int y_max = 1024 / X;
+  long target = 2048L * restrict_num_sms_PRECISION();
+  int Y = 1;
+  while ( 2*Y <= y_max && ( Y < 4 || ( (long)2*num_agg*X*Y < target && Y < n_rows ) ) ) Y *= 2;
+
+  dim3 block( X, Y );
+  int nr_blocks = 2*num_agg;
+  size_t smem = 2*(size_t)X*Y*sizeof(PRECISION);
+
+  cuda_restrict_PRECISION_kernel<SSE_LAYOUT><<< nr_blocks, block, smem >>>( phi_c_gpu, phi_gpu, op_gpu, nev, npev,
+                                                                            agg_sites, (size_t)l->vector_size,
+                                                                            restrict_simd_length_PRECISION() );
   CUDA_CHECK_INTERP( cudaGetLastError() );
 }
 
