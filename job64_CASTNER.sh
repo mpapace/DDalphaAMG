@@ -25,6 +25,10 @@ case "$1" in
     srun -n 2 $MPIRUN_OPTS nsys profile --trace=cuda,nvtx --force-overwrite=true -o prof64_restrict_rank%q{SLURM_PROCID} ./dd_alpha_amg_gpu_restrict 3lvl_sample64_CASTNER.ini > result64_gpu_restrict_nsys.txt 2>&1 ;;
   gpu_restrict_test)
     srun -n 2 $MPIRUN_OPTS ./dd_alpha_amg_gpu_restrict_test 3lvl_sample64_CASTNER.ini > result64_gpu_restrict_test.txt 2>&1 ;;
+  gpu_vanilla_omp72)
+    OMP_NUM_THREADS=72 srun -n 2 -c 72 --cpu-bind=cores --gpus-per-task=1 $V/dd_alpha_amg_gpu_vanilla 3lvl_sample64_CASTNER_omp72.ini > result64_gpu_vanilla_omp72.txt 2>&1 ;;
+  gpu_restrict_omp72)
+    OMP_NUM_THREADS=72 srun -n 2 -c 72 --cpu-bind=cores --gpus-per-task=1 ./dd_alpha_amg_gpu_restrict 3lvl_sample64_CASTNER_omp72.ini > result64_gpu_restrict_omp72.txt 2>&1 ;;
   *)
     echo "unknown run: $1"; exit 1 ;;
 esac
