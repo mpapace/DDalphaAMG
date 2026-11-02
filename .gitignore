@@ -26,3 +26,12 @@ mpi_err_*
 # Editor settings
 .vscode
 benchmark/a.out
+# run outputs, logs, profiles, test binaries (CASTNER work)
+/result*.txt
+/build_*.log
+/job64_*.out
+/*.nsys-rep
+/*.sqlite
+/*_cuda_gpu_trace.csv
+/dd_alpha_amg_gpu_*
+/core
