@@ -133,7 +133,7 @@ endif
 OPT_VERSION_FLAGS_CUDA = -O3 -Xcompiler "-ffast-math"
 DEBUG_VERSION_FLAGS_CUDA = 
 
-NVCC_LINK_FLAGS = $(NVCC_ARCHITECTURE_FLAGS) -lmpi -lgomp -lm -L$(CRAY_MPICH_ROOTDIR)/gtl/lib -lmpi_gtl_cuda
+NVCC_LINK_FLAGS = $(NVCC_ARCHITECTURE_FLAGS) -lmpi -lgomp -lm -L$(CRAY_MPICH_ROOTDIR)/gtl/lib -lmpi_gtl_cuda -cudadevrt none
 ifdef MPI_LIB
 	NVCC_LINK_FLAGS += -L$(MPI_LIB)
 endif
