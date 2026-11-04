@@ -138,10 +138,231 @@ static int restrict_num_sms_PRECISION( void ) {
 }
 
 
+// Dedicated non-blocking stream for the restriction (created at first use, kept for the
+// whole run). Copies and kernel launched on the legacy default stream synchronise implicitly
+// with all the other (blocking) streams of the fork; on a non-blocking stream they do not.
+// No implicit synchronisation is needed here: phi is a host vector, and the operator is
+// copied with a synchronous cudaMemcpy before the first restriction.
+// Compile with -DCUDA_RESTRICT_DEFAULT_STREAM to use the legacy default stream as before.
+static cudaStream_t restrict_stream_PRECISION( void ) {
+#ifdef CUDA_RESTRICT_DEFAULT_STREAM
+  return 0;
+#else
+  static cudaStream_t s = 0;
+  static int created = 0;
+  if ( !created ) {
+    CUDA_CHECK_INTERP( cudaStreamCreateWithFlags( &s, cudaStreamNonBlocking ) );
+    created = 1;
+  }
+  return s;
+#endif
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Pinned (page-locked) host memory for the restriction copies.
+// cudaMemcpy from/to pageable memory (plain malloc) needs extra driver work at every call
+// (~20 us for the 1.5 MiB copy at depth 1). Host buffers that live as long as the level
+// are registered once with cudaHostRegister and unregistered in
+// cuda_interpolation_PRECISION_free, which the vanilla code calls before it frees any of them.
+// Registration costs tens of ms per GB, so only the coarse levels (depth >= 1) are pinned:
+// there the buffers are small (MB) and the pageable overhead is large compared with the copy.
+// At depth 0 (copies of ~100 MB, overhead ~15 us out of ~250 us) it would not pay off.
+// Pinned at depth >= 1:
+//   - transfer buffer of the next level (destination of the DtoH copy)
+//   - test vectors of the level (phi during the setup)
+//   - l->vbuf_PRECISION[3]          (phi in the vcycle, residual after smoothing)
+//   - basis vectors V of the FGMRES of the level (phi in the K-cycle), registered at the
+//     first restriction call, because they may be allocated after the operator setup;
+//     they are freed by next_level_PRECISION_free after cuda_interpolation_PRECISION_free
+// Any other phi is copied from pageable memory as before; such calls are counted and listed
+// in the report printed by cuda_interpolation_PRECISION_free (rank 0).
+// Compile with -DCUDA_RESTRICT_NO_PIN to disable the registration (the report stays).
+// ---------------------------------------------------------------------------------------
+
+#define RESTRICT_MAX_PINNED_PRECISION 64
+#define RESTRICT_MAX_PHI_PRECISION   256
+#define RESTRICT_MAX_DEPTH_PRECISION  64
+
+typedef struct {
+  void *ptr;
+  size_t bytes;
+  int depth;
+  int owned;          // 1: registered by us (unregister at free), 0: was already pinned
+  const char *name;
+} restrict_pinned_region_PRECISION;
+
+typedef struct {
+  const void *ptr;
+  int depth;
+  long calls;
+  const char *label;
+  int index;
+} restrict_phi_stat_PRECISION;
+
+static restrict_pinned_region_PRECISION restrict_pinned_PRECISION[RESTRICT_MAX_PINNED_PRECISION];
+static int restrict_num_pinned_PRECISION = 0;
+static restrict_phi_stat_PRECISION restrict_phi_stats_PRECISION[RESTRICT_MAX_PHI_PRECISION];
+static int restrict_num_phi_stats_PRECISION = 0;
+static long restrict_calls_pinned_PRECISION[RESTRICT_MAX_DEPTH_PRECISION]   = {0};
+static long restrict_calls_pageable_PRECISION[RESTRICT_MAX_DEPTH_PRECISION] = {0};
+
+static int restrict_rank_PRECISION( void ) {
+  int rank;
+  MPI_Comm_rank( MPI_COMM_WORLD, &rank );
+  return rank;
+}
+
+// registers [ptr, ptr+bytes) as pinned memory (once per pointer)
+static void restrict_pin_PRECISION( void *ptr, size_t bytes, int depth, const char *name ) {
+#ifndef CUDA_RESTRICT_NO_PIN
+  if ( ptr == NULL || bytes == 0 ) return;
+  for ( int r=0; r<restrict_num_pinned_PRECISION; r++ )
+    if ( restrict_pinned_PRECISION[r].ptr == ptr ) return;
+  if ( restrict_num_pinned_PRECISION >= RESTRICT_MAX_PINNED_PRECISION ) {
+    fprintf( stderr, "cuda_restrict_PRECISION: too many pinned regions, %s stays pageable\n", name );
+    return;
+  }
+
+  int owned = 1;
+  cudaError_t err = cudaHostRegister( ptr, bytes, cudaHostRegisterDefault );
+  if ( err == cudaErrorHostMemoryAlreadyRegistered ) {
+    cudaGetLastError();   // clear the error: the memory is already pinned, not ours to unregister
+    owned = 0;
+  } else if ( err != cudaSuccess ) {
+    cudaGetLastError();
+    fprintf( stderr, "cuda_restrict_PRECISION: cudaHostRegister of %s (%zu bytes) failed: %s, stays pageable\n",
+             name, bytes, cudaGetErrorString(err) );
+    return;
+  }
+
+  restrict_pinned_region_PRECISION *reg = &restrict_pinned_PRECISION[restrict_num_pinned_PRECISION++];
+  reg->ptr = ptr; reg->bytes = bytes; reg->depth = depth; reg->owned = owned; reg->name = name;
+
+  if ( restrict_rank_PRECISION() == 0 )
+    printf( "[restrict pinned] depth %d: %-24s %10.3f MiB pinned%s\n", depth, name,
+            bytes/(1024.0*1024.0), owned ? "" : " (already registered)" );
+#endif
+}
+
+// unregisters all regions of one level
+static void restrict_unpin_level_PRECISION( int depth ) {
+  int keep = 0;
+  for ( int r=0; r<restrict_num_pinned_PRECISION; r++ ) {
+    restrict_pinned_region_PRECISION *reg = &restrict_pinned_PRECISION[r];
+    if ( reg->depth == depth ) {
+      if ( reg->owned ) {
+        cudaError_t err = cudaHostUnregister( reg->ptr );
+        if ( err != cudaSuccess ) {
+          cudaGetLastError();
+          fprintf( stderr, "cuda_restrict_PRECISION: cudaHostUnregister of %s failed: %s\n",
+                   reg->name, cudaGetErrorString(err) );
+        }
+      }
+    } else {
+      restrict_pinned_PRECISION[keep++] = *reg;
+    }
+  }
+  restrict_num_pinned_PRECISION = keep;
+}
+
+// 1 if [ptr, ptr+bytes) lies inside a pinned region
+static int restrict_is_pinned_PRECISION( const void *ptr, size_t bytes ) {
+  const char *p = (const char*) ptr;
+  for ( int r=0; r<restrict_num_pinned_PRECISION; r++ ) {
+    const char *b = (const char*) restrict_pinned_PRECISION[r].ptr;
+    if ( p >= b && p + bytes <= b + restrict_pinned_PRECISION[r].bytes ) return 1;
+  }
+  return 0;
+}
+
+// name of phi among the known vectors of the level (for the report)
+static const char *restrict_phi_label_PRECISION( const void *phi, level_struct *l, int *index ) {
+  gmres_PRECISION_struct *p = &(l->p_PRECISION);
+  *index = -1;
+  if ( phi == p->b ) return "l->p_PRECISION.b";
+  if ( phi == p->x ) return "l->p_PRECISION.x";
+  if ( phi == p->r ) return "l->p_PRECISION.r";
+  if ( phi == p->w ) return "l->p_PRECISION.w";
+  if ( p->V != NULL )
+    for ( int i=0; i<=p->restart_length; i++ ) if ( phi == p->V[i] ) { *index = i; return "l->p_PRECISION.V"; }
+  if ( p->Z != NULL )
+    for ( int i=0; i<p->restart_length; i++ ) if ( phi == p->Z[i] ) { *index = i; return "l->p_PRECISION.Z"; }
+  for ( int i=0; i<9; i++ ) if ( phi == l->vbuf_PRECISION[i] ) { *index = i; return "l->vbuf_PRECISION"; }
+  return "unknown";
+}
+
+// counts one restriction call, by kind of host memory of phi
+static void restrict_note_phi_PRECISION( const void *phi, size_t bytes, level_struct *l ) {
+  int d = ( l->depth < RESTRICT_MAX_DEPTH_PRECISION ) ? l->depth : RESTRICT_MAX_DEPTH_PRECISION-1;
+  if ( restrict_is_pinned_PRECISION( phi, bytes ) ) {
+    restrict_calls_pinned_PRECISION[d]++;
+    return;
+  }
+  restrict_calls_pageable_PRECISION[d]++;
+  for ( int s=0; s<restrict_num_phi_stats_PRECISION; s++ )
+    if ( restrict_phi_stats_PRECISION[s].ptr == phi && restrict_phi_stats_PRECISION[s].depth == l->depth ) {
+      restrict_phi_stats_PRECISION[s].calls++;
+      return;
+    }
+  if ( restrict_num_phi_stats_PRECISION < RESTRICT_MAX_PHI_PRECISION ) {
+    restrict_phi_stat_PRECISION *st = &restrict_phi_stats_PRECISION[restrict_num_phi_stats_PRECISION++];
+    st->ptr = phi; st->depth = l->depth; st->calls = 1;
+    st->label = restrict_phi_label_PRECISION( phi, l, &(st->index) );
+  }
+}
+
+// pins the basis vectors V[0..restart_length] of the FGMRES of the level (depth >= 1 only).
+// Called at every restriction call; does nothing once the block is registered or if the
+// level has no FGMRES. V is registered as one block if contiguous, else vector by vector.
+static void restrict_pin_fgmres_PRECISION( level_struct *l ) {
+  if ( l->depth < 1 ) return;
+  gmres_PRECISION_struct *p = &(l->p_PRECISION);
+  if ( p->V == NULL || p->V[0] == NULL || p->restart_length <= 0 ) return;
+  size_t vbytes = (size_t)l->vector_size * sizeof(cu_cmplx_PRECISION);
+  int contiguous = 1;
+  for ( int i=1; i<=p->restart_length; i++ )
+    if ( p->V[i] != p->V[0] + (size_t)i*l->vector_size ) { contiguous = 0; break; }
+  if ( contiguous ) {
+    restrict_pin_PRECISION( p->V[0], (size_t)(p->restart_length+1)*vbytes, l->depth, "FGMRES V (block)" );
+  } else {
+    for ( int i=0; i<=p->restart_length; i++ )
+      restrict_pin_PRECISION( p->V[i], vbytes, l->depth, "FGMRES V[i]" );
+  }
+}
+
+// report of one level (rank 0), then its statistics are reset
+static void restrict_report_level_PRECISION( int depth ) {
+  int d = ( depth < RESTRICT_MAX_DEPTH_PRECISION ) ? depth : RESTRICT_MAX_DEPTH_PRECISION-1;
+  if ( restrict_rank_PRECISION() == 0 &&
+       ( restrict_calls_pinned_PRECISION[d] + restrict_calls_pageable_PRECISION[d] ) > 0 ) {
+    printf( "[restrict pinned] depth %d: %ld calls with phi in pinned memory, %ld in pageable memory\n",
+            depth, restrict_calls_pinned_PRECISION[d], restrict_calls_pageable_PRECISION[d] );
+    for ( int s=0; s<restrict_num_phi_stats_PRECISION; s++ ) {
+      restrict_phi_stat_PRECISION *st = &restrict_phi_stats_PRECISION[s];
+      if ( st->depth != depth ) continue;
+      if ( st->index >= 0 )
+        printf( "[restrict pinned]   pageable phi %p: %6ld calls  (%s[%d])\n", st->ptr, st->calls, st->label, st->index );
+      else
+        printf( "[restrict pinned]   pageable phi %p: %6ld calls  (%s)\n", st->ptr, st->calls, st->label );
+    }
+    fflush( stdout );
+  }
+  restrict_calls_pinned_PRECISION[d] = 0;
+  restrict_calls_pageable_PRECISION[d] = 0;
+  int keep = 0;
+  for ( int s=0; s<restrict_num_phi_stats_PRECISION; s++ )
+    if ( restrict_phi_stats_PRECISION[s].depth != depth )
+      restrict_phi_stats_PRECISION[keep++] = restrict_phi_stats_PRECISION[s];
+  restrict_num_phi_stats_PRECISION = keep;
+}
+
+
 // launches the restriction kernel for the given operator layout
 template<bool SSE_LAYOUT>
 static void cuda_restrict_PRECISION_launch( cuda_vector_PRECISION phi_c_gpu, const cu_cmplx_PRECISION *phi_gpu,
-                                            const cu_cmplx_PRECISION *op_gpu, level_struct *l ) {
+                                            const cu_cmplx_PRECISION *op_gpu, level_struct *l,
+                                            cudaStream_t stream ) {
 
   int num_agg   = l->is_PRECISION.num_agg,
       nev       = l->num_eig_vect,
@@ -165,7 +386,7 @@ static void cuda_restrict_PRECISION_launch( cuda_vector_PRECISION phi_c_gpu, con
   int nr_blocks = 2*num_agg;
   size_t smem = 2*(size_t)X*Y*sizeof(PRECISION);
 
-  cuda_restrict_PRECISION_kernel<SSE_LAYOUT><<< nr_blocks, block, smem >>>( phi_c_gpu, phi_gpu, op_gpu, nev, npev,
+  cuda_restrict_PRECISION_kernel<SSE_LAYOUT><<< nr_blocks, block, smem, stream >>>( phi_c_gpu, phi_gpu, op_gpu, nev, npev,
                                                                             agg_sites, (size_t)l->vector_size,
                                                                             restrict_simd_length_PRECISION() );
   CUDA_CHECK_INTERP( cudaGetLastError() );
@@ -257,7 +478,7 @@ static void cuda_restrict_PRECISION_plain_layout_test( vector_PRECISION phi, lev
   CUDA_CHECK_INTERP( cudaMalloc( (void**)&op_plain_gpu,   n_op*sizeof(cu_cmplx_PRECISION) ) );
   CUDA_CHECK_INTERP( cudaMalloc( (void**)&phi_c_test_gpu, n_coarse*sizeof(cu_cmplx_PRECISION) ) );
   CUDA_CHECK_INTERP( cudaMemcpy( op_plain_gpu, op_plain, n_op*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_restrict_PRECISION_launch<false>( phi_c_test_gpu, l->is_PRECISION.phi_gpu, op_plain_gpu, l );
+  cuda_restrict_PRECISION_launch<false>( phi_c_test_gpu, l->is_PRECISION.phi_gpu, op_plain_gpu, l, 0 );
   CUDA_CHECK_INTERP( cudaMemcpy( res_gpu, phi_c_test_gpu, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
   CUDA_CHECK_INTERP( cudaFree( op_plain_gpu ) );
   CUDA_CHECK_INTERP( cudaFree( phi_c_test_gpu ) );
@@ -303,6 +524,21 @@ extern "C" void cuda_interpolation_PRECISION_op_to_gpu( level_struct *l ) {
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.op_gpu),    op_size*sizeof(cu_cmplx_PRECISION) ) );
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.phi_gpu),   n_fine*sizeof(cu_cmplx_PRECISION) ) );
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.phi_c_gpu), n_coarse*sizeof(cu_cmplx_PRECISION) ) );
+
+    // host buffers of the restriction copies that live as long as the level (see above);
+    // only on the coarse levels, where pinning pays off
+    if ( l->depth >= 1 ) {
+      restrict_pin_PRECISION( l->next_level->gs_PRECISION.transfer_buffer,
+                              (size_t)l->next_level->gs_PRECISION.dist_inner_lattice_sites
+                              * (size_t)l->next_level->num_lattice_site_var * sizeof(cu_cmplx_PRECISION),
+                              l->depth, "next level transfer_buffer" );
+      if ( l->is_PRECISION.test_vector != NULL )
+        restrict_pin_PRECISION( l->is_PRECISION.test_vector[0],
+                                (size_t)l->num_eig_vect * n_fine * sizeof(cu_cmplx_PRECISION),
+                                l->depth, "test vectors" );
+      restrict_pin_PRECISION( l->vbuf_PRECISION[3], (size_t)l->vector_size * sizeof(cu_cmplx_PRECISION),
+                              l->depth, "vbuf_PRECISION[3]" );
+    }
   }
 
   CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.op_gpu, l->is_PRECISION.op,
@@ -311,6 +547,10 @@ extern "C" void cuda_interpolation_PRECISION_op_to_gpu( level_struct *l ) {
 
 
 extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
+
+  // called by the vanilla code before it frees the host buffers of the level
+  restrict_report_level_PRECISION( l->depth );
+  restrict_unpin_level_PRECISION( l->depth );
 
   if ( l->is_PRECISION.op_gpu != NULL ) {
     CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.op_gpu ) );
@@ -341,15 +581,20 @@ extern "C" void cuda_restrict_PRECISION( vector_PRECISION phi_c, vector_PRECISIO
     MPI_Abort( MPI_COMM_WORLD, 1 );
   }
 
-  CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.phi_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
-                                 cudaMemcpyHostToDevice ) );
+  restrict_pin_fgmres_PRECISION( l );
+  restrict_note_phi_PRECISION( phi, n_fine*sizeof(cu_cmplx_PRECISION), l );
+
+  // copy, kernel, copy back on the restriction stream, one synchronisation at the end
+  cudaStream_t stream = restrict_stream_PRECISION();
+  CUDA_CHECK_INTERP( cudaMemcpyAsync( l->is_PRECISION.phi_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
+                                      cudaMemcpyHostToDevice, stream ) );
 
   cuda_restrict_PRECISION_launch<restrict_sse_layout_PRECISION>( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.phi_gpu,
-                                                                 l->is_PRECISION.op_gpu, l );
+                                                                 l->is_PRECISION.op_gpu, l, stream );
 
-  // synchronous copy on the default stream: waits for the kernel to finish
-  CUDA_CHECK_INTERP( cudaMemcpy( l->next_level->gs_PRECISION.transfer_buffer, l->is_PRECISION.phi_c_gpu,
-                                 n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  CUDA_CHECK_INTERP( cudaMemcpyAsync( l->next_level->gs_PRECISION.transfer_buffer, l->is_PRECISION.phi_c_gpu,
+                                      n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost, stream ) );
+  CUDA_CHECK_INTERP( cudaStreamSynchronize( stream ) );
 
 #ifdef CUDA_RESTRICT_TEST
   if ( l->depth < 64 && !restrict_tested_PRECISION[l->depth] ) {
