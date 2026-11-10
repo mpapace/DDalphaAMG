@@ -317,6 +317,8 @@ typedef struct
     cuda_vector_PRECISION oe_b_gpu, oe_x_gpu, oe_chunk_gpu; // depth-0 smoother, odd-even layout (component-wise)
     int *oe_perm_gpu;                                        // Schwarz site index -> odd-even site index
     cuda_vector_PRECISION oe_V_gpu, oe_h_gpu; int oe_V_cols; // GMRES basis and small vector on the GPU
+    int defer_phi_dtoh;              // set before an interpolation: leave phi on the GPU only
+    vector_PRECISION phi_stale_host; // host vector whose current values are only in phi_gpu (or NULL)
 #endif
 } interpolation_PRECISION_struct;
 

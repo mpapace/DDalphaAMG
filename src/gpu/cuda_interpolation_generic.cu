@@ -532,6 +532,8 @@ extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
   }
   l->is_PRECISION.phi_gpu_host = NULL;
   l->is_PRECISION.eta_gpu_host = NULL;
+  l->is_PRECISION.defer_phi_dtoh = 0;
+  l->is_PRECISION.phi_stale_host = NULL;
 }
 
 
@@ -627,9 +629,20 @@ extern "C" void cuda_interpolate_PRECISION( vector_PRECISION phi, vector_PRECISI
   cuda_interpolate_PRECISION_launch<restrict_sse_layout_PRECISION>( l->is_PRECISION.phi_gpu, l->is_PRECISION.phi_c_gpu,
                                                                     l->is_PRECISION.op_gpu, l, add );
 
-  // synchronous copy on the default stream: waits for the kernel to finish
-  CUDA_CHECK_INTERP( cudaMemcpy( phi, l->is_PRECISION.phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION),
-                                 cudaMemcpyDeviceToHost ) );
+#ifdef CUDA_INTERP_TEST
+  l->is_PRECISION.defer_phi_dtoh = 0;   // the test compares on the host
+#endif
+  if ( l->is_PRECISION.defer_phi_dtoh ) {
+    // the depth-0 smoother continues from phi_gpu and copies phi to the host at its end
+    CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
+    l->is_PRECISION.phi_stale_host = phi;
+  } else {
+    // synchronous copy on the default stream: waits for the kernel to finish
+    CUDA_CHECK_INTERP( cudaMemcpy( phi, l->is_PRECISION.phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION),
+                                   cudaMemcpyDeviceToHost ) );
+    l->is_PRECISION.phi_stale_host = NULL;
+  }
+  l->is_PRECISION.defer_phi_dtoh = 0;
   l->is_PRECISION.phi_gpu_host = phi;   // kept on the GPU for the smoother residual
 
 #ifdef CUDA_INTERP_TEST
@@ -671,6 +684,15 @@ extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISIO
   SYNC_HYPERTHREADS(threading)
 
   START_LOCKED_MASTER(threading)
+  if ( is->phi_stale_host != NULL ) {
+    // phi was left only on the GPU by the interpolation: the host copy is needed by the CPU
+    // path (fallback) and by the smoothers that do not continue on the GPU
+    if ( !( use && keep_on_gpu ) )
+      CUDA_CHECK_INTERP( cudaMemcpy( is->phi_stale_host, is->phi_gpu,
+                                     (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
+                                     cudaMemcpyDeviceToHost ) );
+    is->phi_stale_host = NULL;
+  }
   if ( use ) {
     const size_t n_sites = (size_t)l->num_inner_lattice_sites,
                  nsv     = (size_t)l->num_lattice_site_var,

@@ -333,6 +333,15 @@ void vcycle_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECI
         END_MASTER(threading)
       }
 
+#ifdef CUDA_OPT
+      // depth 0, method 4 with odd-even: the smoother starts from the GPU copy of phi (residual on
+      // the GPU) and copies phi to the host at its end, so the interpolation does not copy it back
+      if ( l->depth == 0 && g.method == 4 && g.odd_even ) {
+        START_LOCKED_MASTER(threading)
+        l->is_PRECISION.defer_phi_dtoh = 1;
+        END_LOCKED_MASTER(threading)
+      }
+#endif
       if( i == 0 && res == _NO_RES )
         interpolate3_PRECISION( phi, l->next_level->p_PRECISION.x, l, threading );
       else
