@@ -312,7 +312,8 @@ typedef struct
     vector_PRECISION *test_vector, *interpolation, *bootstrap_vector, tmp;
     complex_PRECISION *op, *eigenvalues, *bootstrap_eigenvalues;
 #ifdef CUDA_OPT
-    cuda_vector_PRECISION op_gpu, phi_gpu, phi_c_gpu; // device buffers for restriction
+    cuda_vector_PRECISION op_gpu, phi_gpu, phi_c_gpu, eta_gpu; // device buffers for restriction and interpolation
+    vector_PRECISION phi_gpu_host, eta_gpu_host; // host vectors whose current copy is in phi_gpu / eta_gpu (or NULL)
 #endif
 } interpolation_PRECISION_struct;
 

@@ -40,6 +40,9 @@ void interpolation_PRECISION_alloc( level_struct *l ) {
   l->is_PRECISION.op_gpu    = NULL;
   l->is_PRECISION.phi_gpu   = NULL;
   l->is_PRECISION.phi_c_gpu = NULL;
+  l->is_PRECISION.eta_gpu   = NULL;
+  l->is_PRECISION.phi_gpu_host = NULL;
+  l->is_PRECISION.eta_gpu_host = NULL;
 #endif
   MALLOC_HUGEPAGES( l->is_PRECISION.test_vector[0], complex_PRECISION, n*l->inner_vector_size, 64 );
   for ( k=1; k<n; k++ ) {

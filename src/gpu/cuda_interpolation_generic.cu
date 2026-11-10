@@ -12,6 +12,8 @@ extern "C"{
 
 }
 
+#include "cuda_componentwise.h"
+
 #ifdef CUDA_OPT
 
 #define CUDA_CHECK_INTERP(call)                                                   \
@@ -295,7 +297,7 @@ static int restrict_tested_PRECISION[64] = {0};
 //   2. computes the restriction on the CPU with the loop of interpolation_generic.c
 //   3. runs the plain-layout instance of the GPU kernel
 //   4. compares both GPU results (plain-layout test and production) with the CPU reference
-// Expects phi already uploaded to l->is_PRECISION.phi_gpu and the production result in the transfer buffer.
+// Expects phi already uploaded to l->is_PRECISION.eta_gpu and the production result in the transfer buffer.
 static void cuda_restrict_PRECISION_plain_layout_test( vector_PRECISION phi, level_struct *l ) {
 
   int num_agg   = l->is_PRECISION.num_agg,
@@ -357,7 +359,7 @@ static void cuda_restrict_PRECISION_plain_layout_test( vector_PRECISION phi, lev
   CUDA_CHECK_INTERP( cudaMalloc( (void**)&op_plain_gpu,   n_op*sizeof(cu_cmplx_PRECISION) ) );
   CUDA_CHECK_INTERP( cudaMalloc( (void**)&phi_c_test_gpu, n_coarse*sizeof(cu_cmplx_PRECISION) ) );
   CUDA_CHECK_INTERP( cudaMemcpy( op_plain_gpu, op_plain, n_op*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_restrict_PRECISION_launch<false>( phi_c_test_gpu, l->is_PRECISION.phi_gpu, op_plain_gpu, l );
+  cuda_restrict_PRECISION_launch<false>( phi_c_test_gpu, l->is_PRECISION.eta_gpu, op_plain_gpu, l );
   CUDA_CHECK_INTERP( cudaMemcpy( res_gpu, phi_c_test_gpu, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
   CUDA_CHECK_INTERP( cudaFree( op_plain_gpu ) );
   CUDA_CHECK_INTERP( cudaFree( phi_c_test_gpu ) );
@@ -491,6 +493,7 @@ extern "C" void cuda_interpolation_PRECISION_op_to_gpu( level_struct *l ) {
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.op_gpu),    op_size*sizeof(cu_cmplx_PRECISION) ) );
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.phi_gpu),   n_fine*sizeof(cu_cmplx_PRECISION) ) );
     CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.phi_c_gpu), n_coarse*sizeof(cu_cmplx_PRECISION) ) );
+    CUDA_CHECK_INTERP( cudaMalloc( (void**)&(l->is_PRECISION.eta_gpu),   n_fine*sizeof(cu_cmplx_PRECISION) ) );
   }
 
   CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.op_gpu, l->is_PRECISION.op,
@@ -504,10 +507,14 @@ extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
     CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.op_gpu ) );
     CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.phi_gpu ) );
     CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.phi_c_gpu ) );
+    CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.eta_gpu ) );
     l->is_PRECISION.op_gpu    = NULL;
     l->is_PRECISION.phi_gpu   = NULL;
     l->is_PRECISION.phi_c_gpu = NULL;
+    l->is_PRECISION.eta_gpu   = NULL;
   }
+  l->is_PRECISION.phi_gpu_host = NULL;
+  l->is_PRECISION.eta_gpu_host = NULL;
 }
 
 
@@ -529,10 +536,11 @@ extern "C" void cuda_restrict_PRECISION( vector_PRECISION phi_c, vector_PRECISIO
     MPI_Abort( MPI_COMM_WORLD, 1 );
   }
 
-  CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.phi_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
+  CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.eta_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
                                  cudaMemcpyHostToDevice ) );
+  l->is_PRECISION.eta_gpu_host = phi;   // kept on the GPU for the smoother residual
 
-  cuda_restrict_PRECISION_launch<restrict_sse_layout_PRECISION>( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.phi_gpu,
+  cuda_restrict_PRECISION_launch<restrict_sse_layout_PRECISION>( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.eta_gpu,
                                                                  l->is_PRECISION.op_gpu, l );
 
   // synchronous copy on the default stream: waits for the kernel to finish
@@ -605,6 +613,7 @@ extern "C" void cuda_interpolate_PRECISION( vector_PRECISION phi, vector_PRECISI
   // synchronous copy on the default stream: waits for the kernel to finish
   CUDA_CHECK_INTERP( cudaMemcpy( phi, l->is_PRECISION.phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION),
                                  cudaMemcpyDeviceToHost ) );
+  l->is_PRECISION.phi_gpu_host = phi;   // kept on the GPU for the smoother residual
 
 #ifdef CUDA_INTERP_TEST
   if ( do_test ) {
@@ -616,6 +625,60 @@ extern "C" void cuda_interpolate_PRECISION( vector_PRECISION phi, vector_PRECISI
   END_LOCKED_MASTER(threading)
 
   PROF_PRECISION_STOP( _PR, 1, threading );
+}
+
+
+__global__ void cuda_fine_residual_PRECISION_kernel( cu_cmplx_PRECISION *r, const cu_cmplx_PRECISION *eta,
+                                                     const cu_cmplx_PRECISION *dphi, size_t n ) {
+  size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
+  if ( i < n )
+    r[i] = make_cu_cmplx_PRECISION( eta[i].x - dphi[i].x, eta[i].y - dphi[i].y );
+}
+
+
+// Depth-0 smoother residual r = eta - D phi on the GPU, using the copies of phi (left on the GPU
+// by the interpolation) and of eta (left by the restriction) if they still belong to these host
+// vectors. Returns 1 if the residual was computed here (r is then on the host), 0 if the caller
+// has to compute it. Called by all threads; the tags are consumed in both cases.
+extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISION phi, vector_PRECISION eta,
+                                             operator_PRECISION_struct *op, level_struct *l,
+                                             struct Thread *threading ) {
+
+  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
+  int use = ( l->depth == 0 && is->op_gpu != NULL && op->x_componentwise_gpu != NULL &&
+              is->phi_gpu_host == phi && is->eta_gpu_host == eta );
+
+  // every thread has read the tags before the master resets them
+  SYNC_CORES(threading)
+  SYNC_HYPERTHREADS(threading)
+
+  START_LOCKED_MASTER(threading)
+  if ( use ) {
+    const size_t n_sites = (size_t)l->num_inner_lattice_sites,
+                 nsv     = (size_t)l->num_lattice_site_var,
+                 n_fine  = (size_t)l->inner_vector_size;
+    const unsigned int block = 128;
+
+    // phi (ordering of the Schwarz operator, site by site) -> component-wise, D phi, back
+    reorderArrayByComponent<<< minGridSizeForN( n_sites, block ), block >>>( op->x_componentwise_gpu, is->phi_gpu,
+                                                                             nsv, n_sites );
+    CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
+    cuda_d_plus_clover_PRECISION( op->w_componentwise_gpu, op->x_componentwise_gpu, op, l, threading );
+    reorderArrayByChunks<<< minGridSizeForN( n_sites, block ), block >>>( op->w_gpu, op->w_componentwise_gpu,
+                                                                          nsv, n_sites );
+    // r = eta - D phi, in op->x_gpu (free at this point)
+    cuda_fine_residual_PRECISION_kernel<<< minGridSizeForN( n_fine, 256 ), 256 >>>( op->x_gpu, is->eta_gpu,
+                                                                                   op->w_gpu, n_fine );
+    CUDA_CHECK_INTERP( cudaGetLastError() );
+    // synchronous copy: waits for the kernels
+    CUDA_CHECK_INTERP( cudaMemcpy( r, op->x_gpu, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  }
+  is->phi_gpu_host = NULL;
+  is->eta_gpu_host = NULL;
+  END_LOCKED_MASTER(threading)
+  SYNC_HYPERTHREADS(threading)
+
+  return use;
 }
 
 #endif

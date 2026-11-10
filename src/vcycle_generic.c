@@ -76,8 +76,16 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
         if ( res == _RES ) {
           // with CUDA_OPT the d_plus_clover proxy applies the operator on the GPU (the GPU data of the
           // Schwarz operator are filled in schwarz_PRECISION_setup), without CUDA_OPT on the CPU
-          apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
-          vector_PRECISION_minus( l->sp_PRECISION.x, eta, l->sp_PRECISION.x, start, end, l );
+#ifdef CUDA_OPT
+          // depth 0: phi and eta are still on the GPU (interpolation and restriction), so the
+          // residual is computed there without copying them again; CPU/proxy path otherwise
+          if ( g.method != 4 ||
+               !cuda_fine_residual_PRECISION( l->sp_PRECISION.x, phi, eta, l->p_PRECISION.op, l, threading ) )
+#endif
+          {
+            apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
+            vector_PRECISION_minus( l->sp_PRECISION.x, eta, l->sp_PRECISION.x, start, end, l );
+          }
         }
         block_to_oddeven_PRECISION( l->sp_PRECISION.b, res==_RES?l->sp_PRECISION.x:eta, l, threading );
         START_LOCKED_MASTER(threading)
