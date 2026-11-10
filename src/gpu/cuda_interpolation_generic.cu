@@ -534,6 +534,10 @@ extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
   l->is_PRECISION.eta_gpu_host = NULL;
   l->is_PRECISION.defer_phi_dtoh = 0;
   l->is_PRECISION.phi_stale_host = NULL;
+  l->is_PRECISION.eta_resident_host = NULL;
+  l->is_PRECISION.eta_stale_host = NULL;
+  l->is_PRECISION.keep_phi_result = 0;
+  l->is_PRECISION.phi_result_host = NULL;
 }
 
 
@@ -555,8 +559,15 @@ extern "C" void cuda_restrict_PRECISION( vector_PRECISION phi_c, vector_PRECISIO
     MPI_Abort( MPI_COMM_WORLD, 1 );
   }
 
-  CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.eta_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
-                                 cudaMemcpyHostToDevice ) );
+  if ( l->is_PRECISION.eta_resident_host == phi ) {
+    // eta was written into eta_gpu by the outer FGMRES on the GPU: no copy, the host copy is stale
+    l->is_PRECISION.eta_stale_host = phi;
+  } else {
+    CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.eta_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
+                                   cudaMemcpyHostToDevice ) );
+    l->is_PRECISION.eta_stale_host = NULL;
+  }
+  l->is_PRECISION.eta_resident_host = NULL;
   l->is_PRECISION.eta_gpu_host = phi;   // kept on the GPU for the smoother residual
 
   cuda_restrict_PRECISION_launch<restrict_sse_layout_PRECISION>( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.eta_gpu,
@@ -692,6 +703,14 @@ extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISIO
                                      (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
                                      cudaMemcpyDeviceToHost ) );
     is->phi_stale_host = NULL;
+  }
+  if ( is->eta_stale_host != NULL ) {
+    // eta was given to the restriction only on the GPU (outer FGMRES on the GPU)
+    if ( !( use && keep_on_gpu ) )
+      CUDA_CHECK_INTERP( cudaMemcpy( is->eta_stale_host, is->eta_gpu,
+                                     (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
+                                     cudaMemcpyDeviceToHost ) );
+    is->eta_stale_host = NULL;
   }
   if ( use ) {
     const size_t n_sites = (size_t)l->num_inner_lattice_sites,
@@ -842,8 +861,14 @@ static void smoother_oe_finish_core_PRECISION( vector_PRECISION phi, level_struc
   cuda_oe_cw_add_to_block_PRECISION_kernel<<< minGridSizeForN( n, 128 ), 128 >>>( is->phi_gpu, x_cw, is->oe_perm_gpu,
                                                                                   n, n_even, nsv );
   CUDA_CHECK_INTERP( cudaGetLastError() );
-  CUDA_CHECK_INTERP( cudaMemcpy( phi, is->phi_gpu, (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
-                                 cudaMemcpyDeviceToHost ) );
+  if ( is->keep_phi_result ) {
+    // the outer FGMRES on the GPU reads phi from phi_gpu
+    CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
+    is->phi_result_host = phi;
+  } else {
+    CUDA_CHECK_INTERP( cudaMemcpy( phi, is->phi_gpu, (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
+                                   cudaMemcpyDeviceToHost ) );
+  }
 }
 
 

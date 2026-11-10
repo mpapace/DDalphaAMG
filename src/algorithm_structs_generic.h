@@ -319,6 +319,10 @@ typedef struct
     cuda_vector_PRECISION oe_V_gpu, oe_h_gpu; int oe_V_cols; // GMRES basis and small vector on the GPU
     int defer_phi_dtoh;              // set before an interpolation: leave phi on the GPU only
     vector_PRECISION phi_stale_host; // host vector whose current values are only in phi_gpu (or NULL)
+    vector_PRECISION eta_resident_host; // set by the outer FGMRES on the GPU: eta_gpu already holds this vector
+    vector_PRECISION eta_stale_host;    // host vector whose current values are only in eta_gpu (or NULL)
+    int keep_phi_result;                // set by the outer FGMRES on the GPU: the smoother leaves phi in phi_gpu
+    vector_PRECISION phi_result_host;   // host vector whose result was left in phi_gpu by the smoother (or NULL)
 #endif
 } interpolation_PRECISION_struct;
 

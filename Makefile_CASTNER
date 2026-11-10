@@ -141,6 +141,8 @@ NVCC_LINK_FLAGS = $(NVCC_ARCHITECTURE_FLAGS) -lmpi -lgomp -lm -L$(CRAY_MPICH_ROO
 CUBLAS_INC_DIR ?= /opt/nvidia/hpc_sdk/Linux_aarch64/25.9/math_libs/13.0/targets/sbsa-linux/include
 CUBLAS_LIB_DIR ?= /opt/nvidia/hpc_sdk/Linux_aarch64/25.9/math_libs/13.0/targets/sbsa-linux/lib
 COMPILE_FLAGS_CUDA += -I$(CUBLAS_INC_DIR)
+# same output options as COMPILE_FLAGS (used by gpu/cuda_outer_fgmres.cu)
+COMPILE_FLAGS_CUDA += -DTRACK_RES -DFGMRES_RESTEST
 NVCC_LINK_FLAGS += -L$(CUBLAS_LIB_DIR) -lcublas -Xlinker -rpath -Xlinker $(CUBLAS_LIB_DIR)
 ifdef MPI_LIB
 	NVCC_LINK_FLAGS += -L$(MPI_LIB)
