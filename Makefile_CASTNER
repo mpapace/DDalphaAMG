@@ -53,6 +53,9 @@ endif
 # include twisted mass term at the coarsest level
 COMMON_COMPILE_FLAGS += -DTM_COARSEST
 
+# extra -D flags for C and CUDA from the make command line, e.g. make EXTRA_FLAGS=-DRICHARDSON_SMOOTHER
+COMMON_COMPILE_FLAGS += $(EXTRA_FLAGS)
+
 # LAPACK is needed for coarsest-level improvements
 #LAPACK_DIR = dependencies/lapack-3.9.0
 #LAPACKE_DIR = $(LAPACK_DIR)/LAPACKE

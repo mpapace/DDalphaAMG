@@ -28,7 +28,7 @@ OUT=check_${SLURM_JOB_ID}.txt
 echo "binary: $EXE   input: $INPUT   node: $(hostname)   $(date)"
 echo "git:    $(git rev-parse --short HEAD 2>/dev/null) ($(git rev-parse --abbrev-ref HEAD 2>/dev/null))"
 
-MPICH_GPU_SUPPORT_ENABLED=1 OMP_NUM_THREADS=1 \
+MPICH_GPU_SUPPORT_ENABLED=1 OMP_NUM_THREADS=${OMP:-1} \
   srun -N 1 -n 2 -c 72 --cpu-bind=cores --gpus-per-task=1 --gpu-bind=closest \
        "$EXE" "$INPUT" > "$OUT" 2>&1
 echo "exit code: $?   full output: $OUT"
