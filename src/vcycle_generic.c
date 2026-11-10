@@ -20,6 +20,13 @@
  */
 
 #include "main.h"
+
+// depth-0 method-4 smoother: odd-even part on the GPU (not with the GCR/Richardson smoothers)
+#if defined( CUDA_OPT ) && !defined( GCR_SMOOTHER ) && !defined( RICHARDSON_SMOOTHER )
+#define SMOOTHER_OE_ON_GPU 1
+#else
+#define SMOOTHER_OE_ON_GPU 0
+#endif
 #include "vcycle_PRECISION.h"
 #ifdef RICHARDSON_SMOOTHER
 #include "proxies/linsolve_proxy_PRECISION.h"
@@ -73,20 +80,42 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
     END_LOCKED_MASTER(threading)
     if ( g.method == 4 || g.method == 6 ) {
       if ( g.odd_even ) {
+        int oe_on_gpu = 0;
         if ( res == _RES ) {
           // with CUDA_OPT the d_plus_clover proxy applies the operator on the GPU (the GPU data of the
           // Schwarz operator are filled in schwarz_PRECISION_setup), without CUDA_OPT on the CPU
 #ifdef CUDA_OPT
           // depth 0: phi and eta are still on the GPU (interpolation and restriction), so the
           // residual is computed there without copying them again; CPU/proxy path otherwise
-          if ( g.method != 4 ||
-               !cuda_fine_residual_PRECISION( l->sp_PRECISION.x, phi, eta, l->p_PRECISION.op, l, threading ) )
+          // with the GMRES smoother, r stays on the GPU for the odd-even part (oe_on_gpu)
+          if ( g.method == 4 &&
+               cuda_fine_residual_PRECISION( l->sp_PRECISION.x, phi, eta, l->p_PRECISION.op, l, threading,
+                                             SMOOTHER_OE_ON_GPU ) )
+            oe_on_gpu = SMOOTHER_OE_ON_GPU;
+          else
 #endif
           {
             apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
             vector_PRECISION_minus( l->sp_PRECISION.x, eta, l->sp_PRECISION.x, start, end, l );
           }
         }
+#ifdef CUDA_OPT
+        if ( oe_on_gpu ) {
+          // depth 0: odd-even preparation and reconstruction on the GPU, GMRES on the CPU
+          START_MASTER(threading);
+          PROF_PRECISION_START( _SM_OE );
+          END_MASTER(threading);
+          cuda_smoother_oe_prepare_PRECISION( l->sp_PRECISION.b, l, threading );
+          START_LOCKED_MASTER(threading)
+          l->sp_PRECISION.initial_guess_zero = _NO_RES;
+          END_LOCKED_MASTER(threading)
+          fgmres_PRECISION( &(l->sp_PRECISION), l, threading );
+          cuda_smoother_oe_finish_PRECISION( phi, l->sp_PRECISION.x, l, threading );
+          START_MASTER(threading);
+          PROF_PRECISION_STOP( _SM_OE, 1 );
+          END_MASTER(threading);
+        } else {
+#endif
         block_to_oddeven_PRECISION( l->sp_PRECISION.b, res==_RES?l->sp_PRECISION.x:eta, l, threading );
         START_LOCKED_MASTER(threading)
         l->sp_PRECISION.initial_guess_zero = _NO_RES;
@@ -172,6 +201,9 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
           oddeven_to_block_PRECISION( l->sp_PRECISION.b, l->sp_PRECISION.x, l, threading );
           vector_PRECISION_plus( phi, phi, l->sp_PRECISION.b, start, end, l );
         }
+#ifdef CUDA_OPT
+        }
+#endif
       } else {
         START_LOCKED_MASTER(threading)
         l->sp_PRECISION.x = phi; l->sp_PRECISION.b = eta;

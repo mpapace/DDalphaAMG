@@ -314,6 +314,8 @@ typedef struct
 #ifdef CUDA_OPT
     cuda_vector_PRECISION op_gpu, phi_gpu, phi_c_gpu, eta_gpu; // device buffers for restriction and interpolation
     vector_PRECISION phi_gpu_host, eta_gpu_host; // host vectors whose current copy is in phi_gpu / eta_gpu (or NULL)
+    cuda_vector_PRECISION oe_b_gpu, oe_x_gpu, oe_chunk_gpu; // depth-0 smoother, odd-even layout (component-wise)
+    int *oe_perm_gpu;                                        // Schwarz site index -> odd-even site index
 #endif
 } interpolation_PRECISION_struct;
 
