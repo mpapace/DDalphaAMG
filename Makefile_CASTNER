@@ -137,6 +137,11 @@ OPT_VERSION_FLAGS_CUDA = -O3 -Xcompiler "-ffast-math"
 DEBUG_VERSION_FLAGS_CUDA = 
 
 NVCC_LINK_FLAGS = $(NVCC_ARCHITECTURE_FLAGS) -lmpi -lgomp -lm -L$(CRAY_MPICH_ROOTDIR)/gtl/lib -lmpi_gtl_cuda -cudadevrt none
+# cuBLAS: GMRES of the depth-0 smoother on the GPU
+CUBLAS_INC_DIR ?= /opt/nvidia/hpc_sdk/Linux_aarch64/25.9/math_libs/13.0/targets/sbsa-linux/include
+CUBLAS_LIB_DIR ?= /opt/nvidia/hpc_sdk/Linux_aarch64/25.9/math_libs/13.0/targets/sbsa-linux/lib
+COMPILE_FLAGS_CUDA += -I$(CUBLAS_INC_DIR)
+NVCC_LINK_FLAGS += -L$(CUBLAS_LIB_DIR) -lcublas -Xlinker -rpath -Xlinker $(CUBLAS_LIB_DIR)
 ifdef MPI_LIB
 	NVCC_LINK_FLAGS += -L$(MPI_LIB)
 endif

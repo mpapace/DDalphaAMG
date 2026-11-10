@@ -101,16 +101,22 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
         }
 #ifdef CUDA_OPT
         if ( oe_on_gpu ) {
-          // depth 0: odd-even preparation and reconstruction on the GPU, GMRES on the CPU
+          // depth 0: odd-even preparation, GMRES and reconstruction on the GPU
           START_MASTER(threading);
           PROF_PRECISION_START( _SM_OE );
           END_MASTER(threading);
-          cuda_smoother_oe_prepare_PRECISION( l->sp_PRECISION.b, l, threading );
           START_LOCKED_MASTER(threading)
           l->sp_PRECISION.initial_guess_zero = _NO_RES;
           END_LOCKED_MASTER(threading)
+#ifdef SMOOTHER_GMRES_ON_CPU
+          // step-B path, for comparison: GMRES on the CPU, odd-even part on the GPU
+          cuda_smoother_oe_prepare_PRECISION( l->sp_PRECISION.b, l, threading );
           fgmres_PRECISION( &(l->sp_PRECISION), l, threading );
           cuda_smoother_oe_finish_PRECISION( phi, l->sp_PRECISION.x, l, threading );
+#else
+          // whole smoother on the GPU (GMRES with cuBLAS)
+          cuda_smoother_oe_gmres_PRECISION( phi, &(l->sp_PRECISION), l, threading );
+#endif
           START_MASTER(threading);
           PROF_PRECISION_STOP( _SM_OE, 1 );
           END_MASTER(threading);

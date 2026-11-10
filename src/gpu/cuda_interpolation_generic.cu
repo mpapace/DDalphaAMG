@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <cublas_v2.h>
+#include <complex>
+#include <vector>
 
 extern "C"{
 
@@ -514,6 +517,11 @@ extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
       CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.oe_x_gpu ) );
       CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.oe_chunk_gpu ) );
       CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.oe_perm_gpu ) );
+      if ( l->is_PRECISION.oe_V_gpu != NULL ) {
+        CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.oe_V_gpu ) );
+        CUDA_CHECK_INTERP( cudaFree( l->is_PRECISION.oe_h_gpu ) );
+        l->is_PRECISION.oe_V_gpu = NULL; l->is_PRECISION.oe_h_gpu = NULL; l->is_PRECISION.oe_V_cols = 0;
+      }
       l->is_PRECISION.oe_b_gpu = NULL; l->is_PRECISION.oe_x_gpu = NULL;
       l->is_PRECISION.oe_chunk_gpu = NULL; l->is_PRECISION.oe_perm_gpu = NULL;
     }
@@ -753,18 +761,11 @@ static void smoother_oe_buffers_PRECISION( level_struct *l ) {
 }
 
 
-// Depth-0 method-4 smoother, before the GMRES: r (in the GPU buffer x_gpu of the Schwarz operator,
-// left there by cuda_fine_residual_PRECISION with keep_on_gpu) -> odd-even layout, preparation of
-// the Schur source b_e = r_e - D_eo D_oo^-1 r_o (as cuda_solve_oddeven_PRECISION), copy of b_e to
-// the host vector b (even half only). r_o stays in oe_b_gpu for the reconstruction.
-extern "C" void cuda_smoother_oe_prepare_PRECISION( vector_PRECISION b, level_struct *l, struct Thread *threading ) {
-
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-
-  START_LOCKED_MASTER(threading)
-
-  smoother_oe_buffers_PRECISION( l );
+// odd-even part of the depth-0 smoother, before the GMRES: r (in the GPU buffer x_gpu of the
+// Schwarz operator, left there by cuda_fine_residual_PRECISION with keep_on_gpu) -> odd-even
+// layout in oe_b_gpu, and preparation of the Schur source b_e = r_e - D_eo D_oo^-1 r_o (as
+// cuda_solve_oddeven_PRECISION). r_o stays in the odd half of oe_b_gpu for the reconstruction.
+static void smoother_oe_prepare_core_PRECISION( level_struct *l ) {
 
   interpolation_PRECISION_struct *is = &(l->is_PRECISION);
   operator_PRECISION_struct *op = &(l->oe_op_PRECISION), *s_op = l->p_PRECISION.op;
@@ -786,27 +787,14 @@ extern "C" void cuda_smoother_oe_prepare_PRECISION( vector_PRECISION b, level_st
   cuda_vector_PRECISION_scale( tmp, tmp, make_cu_cmplx_PRECISION(-1.0,0.0), start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
   cuda_hopping_term_PRECISION( b_cw, tmp, op, _EVEN_SITES, l );
   CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
-
-  // even half back to the site-by-site layout of the host vector, and to the host
-  reorderArrayByChunks<<< minGridSizeForN( n_even, 128 ), 128 >>>( is->oe_chunk_gpu, b_cw, (size_t)nsv, (size_t)n_even );
-  CUDA_CHECK_INTERP( cudaMemcpy( b, is->oe_chunk_gpu, (size_t)start_odd*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-
-  END_LOCKED_MASTER(threading)
-  SYNC_HYPERTHREADS(threading)
 }
 
 
-// Depth-0 method-4 smoother, after the GMRES: x_e (host vector x, even half) to the GPU,
+// odd-even part of the depth-0 smoother, after the GMRES: with x_e in the even half of oe_x_gpu,
 // reconstruction of the odd sites x_o = D_oo^-1 ( r_o - D_oe x_e ) (as cuda_solve_oddeven_PRECISION),
-// phi += x in the Schwarz layout on the GPU (phi is still there from the interpolation), and one
+// phi += x in the Schwarz layout on the GPU (phi is still there from the interpolation) and one
 // copy of phi to the host.
-extern "C" void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_PRECISION x, level_struct *l,
-                                                   struct Thread *threading ) {
-
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-
-  START_LOCKED_MASTER(threading)
+static void smoother_oe_finish_core_PRECISION( vector_PRECISION phi, level_struct *l ) {
 
   interpolation_PRECISION_struct *is = &(l->is_PRECISION);
   operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
@@ -817,10 +805,6 @@ extern "C" void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_
   const int start_odd = n_even*nsv, len_odd = n_odd*nsv;
   const unsigned int css = clover_site_size( nsv, l->depth );
   cuda_vector_PRECISION b_cw = is->oe_b_gpu, x_cw = is->oe_x_gpu, tmp = op->buffer_gpu[0];
-
-  CUDA_CHECK_INTERP( cudaMemcpy( is->oe_chunk_gpu, x, (size_t)start_odd*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  reorderArrayByComponent<<< minGridSizeForN( n_even, 128 ), 128 >>>( x_cw, is->oe_chunk_gpu, (size_t)nsv, (size_t)n_even );
-  CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
 
   // x_o = D_oo^-1 b_o - D_oo^-1 D_oe x_e   (b_o = r_o, untouched by the preparation)
   cuda_diag_oo_inv_componentwise_PRECISION( x_cw+start_odd, b_cw+start_odd, op->clover_componentwise_gpu+css*n_even,
@@ -838,9 +822,233 @@ extern "C" void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_
   CUDA_CHECK_INTERP( cudaGetLastError() );
   CUDA_CHECK_INTERP( cudaMemcpy( phi, is->phi_gpu, (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
                                  cudaMemcpyDeviceToHost ) );
+}
 
+
+// Step-B entry points (GMRES on the CPU): kept to compare with the GPU GMRES, see
+// SMOOTHER_GMRES_ON_CPU in vcycle_generic.c. b_e goes to the host before the GMRES, x_e comes back.
+extern "C" void cuda_smoother_oe_prepare_PRECISION( vector_PRECISION b, level_struct *l, struct Thread *threading ) {
+
+  SYNC_CORES(threading)
+  SYNC_HYPERTHREADS(threading)
+  START_LOCKED_MASTER(threading)
+  smoother_oe_buffers_PRECISION( l );
+  smoother_oe_prepare_core_PRECISION( l );
+  const int n_even = l->oe_op_PRECISION.num_even_sites, nsv = l->num_lattice_site_var;
+  reorderArrayByChunks<<< minGridSizeForN( n_even, 128 ), 128 >>>( l->is_PRECISION.oe_chunk_gpu, l->is_PRECISION.oe_b_gpu,
+                                                                    (size_t)nsv, (size_t)n_even );
+  CUDA_CHECK_INTERP( cudaMemcpy( b, l->is_PRECISION.oe_chunk_gpu, (size_t)n_even*nsv*sizeof(cu_cmplx_PRECISION),
+                                 cudaMemcpyDeviceToHost ) );
   END_LOCKED_MASTER(threading)
   SYNC_HYPERTHREADS(threading)
+}
+
+extern "C" void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_PRECISION x, level_struct *l,
+                                                   struct Thread *threading ) {
+
+  SYNC_CORES(threading)
+  SYNC_HYPERTHREADS(threading)
+  START_LOCKED_MASTER(threading)
+  const int n_even = l->oe_op_PRECISION.num_even_sites, nsv = l->num_lattice_site_var;
+  CUDA_CHECK_INTERP( cudaMemcpy( l->is_PRECISION.oe_chunk_gpu, x, (size_t)n_even*nsv*sizeof(cu_cmplx_PRECISION),
+                                 cudaMemcpyHostToDevice ) );
+  reorderArrayByComponent<<< minGridSizeForN( n_even, 128 ), 128 >>>( l->is_PRECISION.oe_x_gpu, l->is_PRECISION.oe_chunk_gpu,
+                                                                      (size_t)nsv, (size_t)n_even );
+  CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
+  smoother_oe_finish_core_PRECISION( phi, l );
+  END_LOCKED_MASTER(threading)
+  SYNC_HYPERTHREADS(threading)
+}
+
+
+#define CUBLAS_CHECK_INTERP(call)                                                 \
+  do {                                                                            \
+    cublasStatus_t st_ = (call);                                                  \
+    if ( st_ != CUBLAS_STATUS_SUCCESS ) {                                         \
+      fprintf( stderr, "cuBLAS error %d at %s:%d\n", (int)st_, __FILE__, __LINE__ ); \
+      MPI_Abort( MPI_COMM_WORLD, 1 );                                             \
+    }                                                                             \
+  } while (0)
+
+// cuBLAS calls for both precisions (overloads, so that this generic file works for float and double)
+static inline cublasStatus_t blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n, const cuFloatComplex *alpha,
+                                        const cuFloatComplex *A, int lda, const cuFloatComplex *x,
+                                        const cuFloatComplex *beta, cuFloatComplex *y ) {
+  return cublasCgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
+static inline cublasStatus_t blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n, const cuDoubleComplex *alpha,
+                                        const cuDoubleComplex *A, int lda, const cuDoubleComplex *x,
+                                        const cuDoubleComplex *beta, cuDoubleComplex *y ) {
+  return cublasZgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
+static inline cublasStatus_t blas_nrm2( cublasHandle_t h, int n, const cuFloatComplex *x, float *r ) {
+  return cublasScnrm2( h, n, x, 1, r ); }
+static inline cublasStatus_t blas_nrm2( cublasHandle_t h, int n, const cuDoubleComplex *x, double *r ) {
+  return cublasDznrm2( h, n, x, 1, r ); }
+static inline cublasStatus_t blas_rscal( cublasHandle_t h, int n, float a, cuFloatComplex *x ) {
+  return cublasCsscal( h, n, &a, x, 1 ); }
+static inline cublasStatus_t blas_rscal( cublasHandle_t h, int n, double a, cuDoubleComplex *x ) {
+  return cublasZdscal( h, n, &a, x, 1 ); }
+static inline cublasStatus_t blas_copy( cublasHandle_t h, int n, const cuFloatComplex *x, cuFloatComplex *y ) {
+  return cublasCcopy( h, n, x, 1, y, 1 ); }
+static inline cublasStatus_t blas_copy( cublasHandle_t h, int n, const cuDoubleComplex *x, cuDoubleComplex *y ) {
+  return cublasZcopy( h, n, x, 1, y, 1 ); }
+static inline cublasStatus_t blas_axpy( cublasHandle_t h, int n, const cuFloatComplex *a, const cuFloatComplex *x,
+                                        cuFloatComplex *y ) {
+  return cublasCaxpy( h, n, a, x, 1, y, 1 ); }
+static inline cublasStatus_t blas_axpy( cublasHandle_t h, int n, const cuDoubleComplex *a, const cuDoubleComplex *x,
+                                        cuDoubleComplex *y ) {
+  return cublasZaxpy( h, n, a, x, 1, y, 1 ); }
+
+static cublasHandle_t smoother_cublas_PRECISION = NULL;
+
+
+// GMRES on the Schur complement of the depth-0 smoother, entirely on the GPU. b and x are the even
+// halves of oe_b_gpu and oe_x_gpu (component-wise layout, as used by the fork's Schur complement).
+// Same algorithm as fgmres_PRECISION for this smoother: no preconditioner, classical Gram-Schmidt,
+// restart_length steps per restart, num_restart restarts, stop if the estimated relative residual
+// drops below p->tol. Inner products and norms are reduced over the processes on the host
+// (MPI_Allreduce of j+1 numbers, as on the CPU); the small Hessenberg problem is solved on the host.
+static int smoother_gmres_gpu_PRECISION( gmres_PRECISION_struct *p, level_struct *l ) {
+
+  typedef std::complex<double> cd;
+  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
+  const int m = p->restart_length;
+  const int n = op->num_even_sites * l->num_lattice_site_var;   // even half: the Schur system
+  const int ld = l->inner_vector_size;                           // column stride of the basis V
+
+  if ( smoother_cublas_PRECISION == NULL ) {
+    CUBLAS_CHECK_INTERP( cublasCreate( &smoother_cublas_PRECISION ) );
+    CUBLAS_CHECK_INTERP( cublasSetPointerMode( smoother_cublas_PRECISION, CUBLAS_POINTER_MODE_HOST ) );
+  }
+  cublasHandle_t h = smoother_cublas_PRECISION;
+  if ( is->oe_V_cols < m+1 ) {
+    if ( is->oe_V_gpu != NULL ) {
+      CUDA_CHECK_INTERP( cudaFree( is->oe_V_gpu ) );
+      CUDA_CHECK_INTERP( cudaFree( is->oe_h_gpu ) );
+    }
+    CUDA_CHECK_INTERP( cudaMalloc( (void**)&(is->oe_V_gpu), (size_t)(m+1)*ld*sizeof(cu_cmplx_PRECISION) ) );
+    CUDA_CHECK_INTERP( cudaMalloc( (void**)&(is->oe_h_gpu), (size_t)(m+1)*sizeof(cu_cmplx_PRECISION) ) );
+    is->oe_V_cols = m+1;
+  }
+
+  cu_cmplx_PRECISION *V = is->oe_V_gpu, *b = is->oe_b_gpu, *x = is->oe_x_gpu, *r = is->oe_chunk_gpu, *hd = is->oe_h_gpu;
+  const cu_cmplx_PRECISION one = make_cu_cmplx_PRECISION(1,0), zero = make_cu_cmplx_PRECISION(0,0),
+                           mone = make_cu_cmplx_PRECISION(-1,0);
+  std::vector<cd> H( (size_t)m*(m+1) ), gam( m+1 ), sn( m ), cs( m ), y( m );
+  std::vector<cu_cmplx_PRECISION> hloc( m+1 ), hglob( m+1 );
+  auto Hc = [&]( int col, int row ) -> cd& { return H[ (size_t)col*(m+1) + row ]; };   // H[j][i] of the CPU code
+
+  // global 2-norm over the even half of all processes
+  auto global_norm = [&]( const cu_cmplx_PRECISION *v ) -> double {
+    PRECISION nl = 0;
+    CUBLAS_CHECK_INTERP( blas_nrm2( h, n, v, &nl ) );
+    PRECISION sq = nl*nl, sq_glob = sq;
+    if ( g.num_processes > 1 )
+      MPI_Allreduce( &sq, &sq_glob, 1, MPI_PRECISION, MPI_SUM, g.comm_cart );
+    return sqrt( (double)sq_glob );
+  };
+
+  double norm_r0 = 1, gamma_jp1 = 1;
+  int finish = 0, iter = 0, j = -1;
+
+  for ( int ol=0; ol<p->num_restart && finish==0; ol++ ) {
+    int res;
+    if ( ol == 0 && p->initial_guess_zero ) {
+      res = _NO_RES;
+      CUBLAS_CHECK_INTERP( blas_copy( h, n, b, r ) );                       // r = b
+    } else {
+      res = _RES;
+      cuda_apply_schur_complement_PRECISION( r, x, op, l );                 // r = S x
+      CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(-1.0), r ) );      // r = b - S x
+      CUBLAS_CHECK_INTERP( blas_axpy( h, n, &one, b, r ) );
+    }
+    double gamma0 = global_norm( r );
+    gam[0] = gamma0;
+    if ( ol == 0 ) norm_r0 = gamma0;
+    CUBLAS_CHECK_INTERP( blas_copy( h, n, r, V ) );                         // v_0 = r / gamma_0
+    CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(1.0/gamma0), V ) );
+
+    for ( int il=0; il<m && finish==0; il++ ) {
+      j = il; iter++;
+      cu_cmplx_PRECISION *vj = V + (size_t)j*ld, *w = V + (size_t)(j+1)*ld; // w is built in place of v_{j+1}
+
+      cuda_apply_schur_complement_PRECISION( w, vj, op, l );                // w = S v_j
+
+      // h_i = <v_i, w>, i = 0..j, reduced over the processes
+      CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_C, n, j+1, &one, V, ld, w, &zero, hd ) );
+      CUDA_CHECK_INTERP( cudaMemcpy( hloc.data(), hd, (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+      if ( g.num_processes > 1 )
+        MPI_Allreduce( hloc.data(), hglob.data(), j+1, MPI_COMPLEX_PRECISION, MPI_SUM, g.comm_cart );
+      else
+        hglob = hloc;
+      for ( int i=0; i<=j; i++ ) Hc(j,i) = cd( hglob[i].x, hglob[i].y );
+
+      // w = w - sum_i h_i v_i  (classical Gram-Schmidt, as on the CPU)
+      CUDA_CHECK_INTERP( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+      CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_N, n, j+1, &mone, V, ld, hd, &one, w ) );
+
+      // h_{j+1} = ||w||, v_{j+1} = w / h_{j+1}
+      double hn = global_norm( w );
+      Hc(j,j+1) = hn;
+      if ( hn > 1e-15 ) CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(1.0/hn), w ) );
+
+      if ( std::abs( Hc(j,j+1) ) > p->tol/10 ) {
+        // Givens rotations (qr_update_PRECISION)
+        for ( int i=0; i<j; i++ ) {
+          cd beta = (-sn[i])*Hc(j,i) + cs[i]*Hc(j,i+1);
+          Hc(j,i) = std::conj(cs[i])*Hc(j,i) + std::conj(sn[i])*Hc(j,i+1);
+          Hc(j,i+1) = beta;
+        }
+        double beta = sqrt( std::norm( Hc(j,j) ) + std::norm( Hc(j,j+1) ) );
+        sn[j] = Hc(j,j+1)/beta; cs[j] = Hc(j,j)/beta;
+        gam[j+1] = (-sn[j])*gam[j]; gam[j] = std::conj(cs[j])*gam[j];
+        Hc(j,j) = beta; Hc(j,j+1) = 0;
+        gamma_jp1 = std::abs( gam[j+1] );
+        if ( gamma_jp1/norm_r0 < p->tol || gamma_jp1/norm_r0 > 1E+5 ) {
+          finish = 1;
+          if ( gamma_jp1/norm_r0 > 1E+5 ) printf0("Divergence of smoother_gmres_gpu_PRECISION, iter = %d\n", iter );
+        }
+      } else {
+        printf0("depth: %d, iter: %d, smoother GMRES (GPU) H(%d,%d) = %+lf+%lfi\n", l->depth, iter, j+1, j,
+                Hc(j,j+1).real(), Hc(j,j+1).imag() );
+        finish = 1;
+        break;
+      }
+    }
+
+    // x = x + sum_i y_i v_i (or x = sum_i y_i v_i after a zero initial guess): compute_solution_PRECISION
+    for ( int i=j; i>=0; i-- ) {
+      y[i] = gam[i];
+      for ( int k=i+1; k<=j; k++ ) y[i] -= Hc(k,i)*y[k];
+      y[i] /= Hc(i,i);
+    }
+    for ( int i=0; i<=j; i++ ) hglob[i] = make_cu_cmplx_PRECISION( (PRECISION)y[i].real(), (PRECISION)y[i].imag() );
+    CUDA_CHECK_INTERP( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+    int add = ( res == _NO_RES ) ? ol : 1;
+    CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_N, n, j+1, &one, V, ld, hd, add ? &one : &zero, x ) );
+  }
+  CUDA_CHECK_INTERP( cudaDeviceSynchronize() );
+  return iter;
+}
+
+
+// Depth-0 method-4 smoother after the GPU residual, entirely on the GPU: odd-even preparation,
+// GMRES on the Schur complement, reconstruction, phi += correction, one copy of phi to the host.
+// Called by all threads (the work is done by the master); returns the number of GMRES iterations.
+extern "C" int cuda_smoother_oe_gmres_PRECISION( vector_PRECISION phi, gmres_PRECISION_struct *p, level_struct *l,
+                                                 struct Thread *threading ) {
+
+  int iter = 0;
+  SYNC_CORES(threading)
+  SYNC_HYPERTHREADS(threading)
+  START_LOCKED_MASTER(threading)
+  smoother_oe_buffers_PRECISION( l );
+  smoother_oe_prepare_core_PRECISION( l );
+  iter = smoother_gmres_gpu_PRECISION( p, l );
+  smoother_oe_finish_core_PRECISION( phi, l );
+  END_LOCKED_MASTER(threading)
+  SYNC_HYPERTHREADS(threading)
+  return iter;
 }
 
 #endif
