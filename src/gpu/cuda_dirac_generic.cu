@@ -660,4 +660,33 @@ extern "C" void cuda_d_plus_clover_PRECISION_vectorwrapper(vector_PRECISION eta,
   cuda_vector_PRECISION_copy(eta, eta_gpu, 0, l->inner_vector_size, l, _D2H, _CUDA_SYNC, 0, streams);
   END_UNTHREADED_FUNCTION(threading)
 }
+extern "C" void cuda_operator_PRECISION_upload_D_clover( operator_PRECISION_struct *op, level_struct *l ) {
+  // Copies the gauge links (D) and the clover term of a depth-0 operator from the host to the
+  // GPU in component-wise ordering, as cuda_dirac_setup does for g.op_double. Needed for the
+  // operators whose GPU arrays are allocated but otherwise never filled, e.g. the Schwarz
+  // operator s_PRECISION.op used for the smoother residual through the d_plus_clover proxy.
+  if ( l->depth != 0 || op->D_gpu == NULL ) return;
+
+  cudaStream_t stream = CU_STREAM_PER_THREAD;
+  cudaStream_t* const streams = &stream;
+  const int n = l->num_inner_lattice_sites;
+  const unsigned int css = clover_site_size(l->num_lattice_site_var, l->depth);
+  constexpr uint blockSize = 128;
+
+  if ( g.csw != 0 ) {
+    cuda_vector_PRECISION_copy( op->clover_gpu, op->clover, 0, n*css, l, _H2D, _CUDA_SYNC, 0, streams );
+    uint gridSize = minGridSizeForN( n, blockSize );
+    reorderArrayByComponent<<<gridSize, blockSize>>>( op->clover_componentwise_gpu, op->clover_gpu, css, n );
+  }
+
+  cuda_vector_PRECISION_copy( op->D_gpu, op->D, 0, 4*9*n, l, _H2D, _CUDA_SYNC, 0, streams );
+  uint gridSize = minGridSizeForN( 9*n, blockSize );
+  for ( int mu=0; mu<4; mu++ ) {
+    reorderArrayWithGapsByComponent<<<gridSize, blockSize>>>( op->Ds_componentwise_gpu[mu], op->D_gpu + 9*mu,
+                                                              9, 3*9, n );
+  }
+  cuda_safe_call( cudaDeviceSynchronize() );
+  cuda_safe_call( cudaGetLastError() );
+}
+
 #endif

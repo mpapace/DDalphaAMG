@@ -20,6 +20,9 @@
  */
 
 #include "main.h"
+#ifdef CUDA_OPT
+#include "gpu/cuda_operator_PRECISION.h"
+#endif
 #include "proxies/dirac_proxy_PRECISION.h"
 #include "proxies/linsolve_proxy_PRECISION.h"
 #include "proxies/operator_proxy_PRECISION.h"
@@ -1111,6 +1114,10 @@ void schwarz_PRECISION_setup( schwarz_PRECISION_struct *s, operator_double_struc
     schwarz_PRECISION_oddeven_setup( &(s->op), l );
   
   schwarz_PRECISION_boundary_update( s, l );
+#ifdef CUDA_OPT
+  // copy D and the clover term of the Schwarz operator to the GPU (otherwise never filled)
+  cuda_operator_PRECISION_upload_D_clover( &(s->op), l );
+#endif
 }
 #endif
 

@@ -74,22 +74,9 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
     if ( g.method == 4 || g.method == 6 ) {
       if ( g.odd_even ) {
         if ( res == _RES ) {
-#ifdef CUDA_OPT
-          // FIXME : this has to be fixed : forcing the double-precision Dirac operator to
-          // be done on CPUs, as things are not prepared properly currently for running
-          // it on GPUs
-          START_MASTER(threading)
-          if ( l->depth == 0 ) l->p_PRECISION.eval_operator = d_plus_clover_PRECISION_cpu; // coarse levels keep their operator
-          END_MASTER(threading)
-          SYNC_CORES(threading)
+          // with CUDA_OPT the d_plus_clover proxy applies the operator on the GPU (the GPU data of the
+          // Schwarz operator are filled in schwarz_PRECISION_setup), without CUDA_OPT on the CPU
           apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
-          START_MASTER(threading)
-          if ( l->depth == 0 ) l->p_PRECISION.eval_operator = d_plus_clover_PRECISION;     // coarse levels keep their operator
-          END_MASTER(threading)
-          SYNC_CORES(threading)
-#else
-          apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
-#endif
           vector_PRECISION_minus( l->sp_PRECISION.x, eta, l->sp_PRECISION.x, start, end, l );
         }
         block_to_oddeven_PRECISION( l->sp_PRECISION.b, res==_RES?l->sp_PRECISION.x:eta, l, threading );
@@ -215,24 +202,9 @@ void vcycle_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECI
       } else {
         int start = threading->start_index[l->depth];
         int end   = threading->end_index[l->depth];
-#ifdef CUDA_OPT
-        // FIXME : this has to be fixed : forcing the double-precision Dirac operator to
-        // be done on CPUs, as things are not prepared properly currently for running
-        // it on GPUs. Note, though, that entering this condition i.e. with a non-zero
-        // initial guess and more than one V-cycle applications is quite unusual when calling
-        // this function vcycle_PRECISION(...)
-        START_MASTER(threading)
-        if ( l->depth == 0 ) l->p_PRECISION.eval_operator = d_plus_clover_PRECISION_cpu; // coarse levels keep their operator
-        END_MASTER(threading)
-        SYNC_CORES(threading)
+        // with CUDA_OPT the d_plus_clover proxy applies the operator on the GPU (the GPU data of the
+        // Schwarz operator are filled in schwarz_PRECISION_setup), without CUDA_OPT on the CPU
         apply_operator_PRECISION( l->vbuf_PRECISION[2], phi, &(l->p_PRECISION), l, threading );
-        START_MASTER(threading)
-        if ( l->depth == 0 ) l->p_PRECISION.eval_operator = d_plus_clover_PRECISION;     // coarse levels keep their operator
-        END_MASTER(threading)
-        SYNC_CORES(threading)
-#else
-        apply_operator_PRECISION( l->vbuf_PRECISION[2], phi, &(l->p_PRECISION), l, threading );
-#endif
         vector_PRECISION_minus( l->vbuf_PRECISION[3], eta, l->vbuf_PRECISION[2], start, end, l );
         restrict_PRECISION( l->next_level->p_PRECISION.b, l->vbuf_PRECISION[3], l, threading );
       }
