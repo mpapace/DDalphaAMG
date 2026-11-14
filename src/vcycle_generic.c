@@ -20,6 +20,7 @@
  */
 
 #include "main.h"
+#include "proxies/interpolation_proxy_PRECISION.h"
 
 // depth-0 method-4 smoother: odd-even part on the GPU (not with the GCR/Richardson smoothers)
 #if defined( CUDA_OPT ) && !defined( GCR_SMOOTHER ) && !defined( RICHARDSON_SMOOTHER )
