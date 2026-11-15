@@ -25,6 +25,10 @@
                                           struct Thread *threading );
   int  cuda_smoother_oe_gmres_PRECISION( vector_PRECISION phi, gmres_PRECISION_struct *p, level_struct *l,
                                          struct Thread *threading );
+#ifdef CUDA_INTERP_BENCHMARK
+  // times of the GPU parts of one call (see proxies/interpolation_proxy_generic.c)
+  void cuda_interpolation_PRECISION_bench( level_struct *l, int op, int reps, double *t );
+#endif
 #endif
 
 #endif

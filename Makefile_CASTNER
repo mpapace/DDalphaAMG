@@ -54,6 +54,7 @@ endif
 COMMON_COMPILE_FLAGS += -DTM_COARSEST
 
 # extra -D flags for C and CUDA from the make command line, e.g. make EXTRA_FLAGS=-DRICHARDSON_SMOOTHER
+#   or EXTRA_FLAGS="-DCUDA_RESTRICT_TEST -DCUDA_INTERP_TEST -DCUDA_INTERP_BENCHMARK"
 COMMON_COMPILE_FLAGS += $(EXTRA_FLAGS)
 
 # LAPACK is needed for coarsest-level improvements
