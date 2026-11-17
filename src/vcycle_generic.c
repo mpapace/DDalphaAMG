@@ -20,6 +20,7 @@
  */
 
 #include "main.h"
+#include "profiling.h"
 #include "proxies/interpolation_proxy_PRECISION.h"
 
 // depth-0 method-4 smoother: odd-even part on the GPU (not with the GCR/Richardson smoothers)
@@ -241,6 +242,7 @@ void vcycle_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECI
                        int res, level_struct *l, struct Thread *threading ) {
 
   int fgmres_ctr = 0;
+  NVTX_MASTER_PUSH( threading, "d%d V-cycle", l->depth );
 
   if ( g.interpolation && l->level>0 ) {
     for ( int i=0; i<l->n_cy; i++ ) {
@@ -355,4 +357,5 @@ void vcycle_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECI
   } else {
     smoother_PRECISION( phi, Dphi, eta, (l->depth==0)?l->n_cy:l->post_smooth_iter, res, _NO_SHIFT, l, threading );
   }
+  NVTX_MASTER_POP( threading );
 }

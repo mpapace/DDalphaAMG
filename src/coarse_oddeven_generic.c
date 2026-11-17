@@ -20,6 +20,7 @@
  */
 
 #include "main.h"
+#include "profiling.h"
 #include "proxies/data_layout_proxy_PRECISION.h"
 
 
@@ -1198,6 +1199,7 @@ void coarse_n_hopping_term_PRECISION_vectorized( vector_PRECISION out, vector_PR
 void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
   int fgmres_iters=0;
+  NVTX_MASTER_PUSH( threading, "d%d coarsest solve", l->depth );
 
   SYNC_CORES(threading)
   PROF_PRECISION_START( _SC, threading );
@@ -1290,6 +1292,7 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
   coarse_diag_oo_inv_PRECISION( p->x, p->b, op, l, threading );
   PROF_PRECISION_STOP( _SC, 1, threading );
   SYNC_CORES(threading)
+  NVTX_MASTER_POP( threading );
 }
 
 

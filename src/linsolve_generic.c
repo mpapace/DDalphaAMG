@@ -552,7 +552,9 @@ int fgmres_PRECISION( gmres_PRECISION_struct *p, level_struct *l, struct Thread 
 * Uses FGMRES to solve the system D x = b, where b is taken from p->b and x is 
 * stored in p->x.                                                              
 *********************************************************************************/  
-  RangeHandleType profilingRangeResFgmres = startProfilingRange("Restarted FGMRES (PRECISION)");
+  char nvtx_label_res[64];
+  snprintf( nvtx_label_res, sizeof(nvtx_label_res), "d%d Restarted FGMRES (PRECISION)", l->depth );
+  RangeHandleType profilingRangeResFgmres = startProfilingRange(nvtx_label_res);
   // RE-ENABLE !
   //printf0("WITHIN fgmres_PRECISION(...), depth=%d \n", l->depth);
 
@@ -594,7 +596,9 @@ int fgmres_PRECISION( gmres_PRECISION_struct *p, level_struct *l, struct Thread 
   //printf0("p->num_restart = %d\n", p->num_restart);
 
   for( ol=0; ol<p->num_restart && finish==0; ol++ )  {
-    RangeHandleType profilingRangeFgmres = startProfilingRange("FGMRES (PRECISION)");
+    char nvtx_label_cyc[64];
+    snprintf( nvtx_label_cyc, sizeof(nvtx_label_cyc), "d%d FGMRES restart cycle (PRECISION)", l->depth );
+    RangeHandleType profilingRangeFgmres = startProfilingRange(nvtx_label_cyc);
 
     // RE-ENABLE !
     ///printf0("for loop of fgmres_PRECISION, iter=%d, depth=%d \n", ol, l->depth);

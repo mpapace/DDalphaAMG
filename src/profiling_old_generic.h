@@ -3,25 +3,42 @@
 
 #include "global_enums.h"
 
+// -DPROF_NVTX (with PROFILING and without NVTX_DISABLE): every PROF_PRECISION_START/STOP pair
+// is also an NVTX range, named after the timer and the depth, so that the CPU time of the timers
+// is visible in Nsight Systems. Only the master thread opens ranges in the threaded variants.
+#if defined(PROFILING) && defined(PROF_NVTX) && !defined(NVTX_DISABLE)
+#include <nvtx3/nvToolsExt.h>
+#define PROF_PRECISION_NVTX_PUSH(TYPE) nvtxRangePushA(l->prof_PRECISION.nvtx_name[TYPE])
+#define PROF_PRECISION_NVTX_POP()      nvtxRangePop()
+#else
+#define PROF_PRECISION_NVTX_PUSH(TYPE)
+#define PROF_PRECISION_NVTX_POP()
+#endif
+
 typedef struct
 {
     double time[_NUM_PROF];
     double flop[_NUM_PROF];
     double count[_NUM_PROF];
     char name[_NUM_PROF][50];
+    char nvtx_name[_NUM_PROF][64];  // "d<depth> <name>", label of the NVTX range (PROF_NVTX)
 } profiling_PRECISION_struct;
 
 #ifdef PROFILING
 #define PROF_PRECISION_START_UNTHREADED(TYPE)        \
     do                                               \
     {                                                \
+        PROF_PRECISION_NVTX_PUSH(TYPE);                        \
         l->prof_PRECISION.time[TYPE] -= MPI_Wtime(); \
     } while (0)
 #define PROF_PRECISION_START_THREADED(TYPE, threading)   \
     do                                                   \
     {                                                    \
         if (threading->core + threading->thread == 0)    \
+        {                                                \
+            PROF_PRECISION_NVTX_PUSH(TYPE);                        \
             l->prof_PRECISION.time[TYPE] -= MPI_Wtime(); \
+        }                                                \
     } while (0)
 #else
 #define PROF_PRECISION_START_UNTHREADED(TYPE)
@@ -34,6 +51,7 @@ typedef struct
     {                                                \
         l->prof_PRECISION.time[TYPE] += MPI_Wtime(); \
         l->prof_PRECISION.count[TYPE] += COUNT;      \
+        PROF_PRECISION_NVTX_POP();                             \
     } while (0)
 #define PROF_PRECISION_STOP_THREADED(TYPE, COUNT, threading) \
     do                                                       \
@@ -42,6 +60,7 @@ typedef struct
         {                                                    \
             l->prof_PRECISION.time[TYPE] += MPI_Wtime();     \
             l->prof_PRECISION.count[TYPE] += COUNT;          \
+            PROF_PRECISION_NVTX_POP();                                 \
         }                                                    \
     } while (0)
 #else

@@ -39,4 +39,25 @@ RangeHandleType startProfilingRange(char const * label);
 void endProfilingRange(RangeHandleType handle);
 
 
+/** \brief NVTX range on the master thread of a threaded region, label in printf format
+ *  (only with -DPROF_NVTX and without NVTX_DISABLE; nothing otherwise). */
+#if defined(PROF_NVTX) && !defined(NVTX_DISABLE)
+#include <stdio.h>
+#define NVTX_MASTER_PUSH(threading, ...)                                       \
+    do {                                                                       \
+        if ((threading)->core + (threading)->thread == 0) {                    \
+            char nvtx_label_[96];                                              \
+            snprintf(nvtx_label_, sizeof(nvtx_label_), __VA_ARGS__);           \
+            nvtxRangePushA(nvtx_label_);                                       \
+        }                                                                      \
+    } while (0)
+#define NVTX_MASTER_POP(threading)                                             \
+    do {                                                                       \
+        if ((threading)->core + (threading)->thread == 0) nvtxRangePop();      \
+    } while (0)
+#else
+#define NVTX_MASTER_PUSH(threading, ...)
+#define NVTX_MASTER_POP(threading)
+#endif
+
 #endif //PROFILING_H

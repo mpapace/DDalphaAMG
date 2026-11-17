@@ -34,6 +34,7 @@ void prof_PRECISION_init( level_struct *l ) {
       l->prof_PRECISION.time[i] = 0.0;
       l->prof_PRECISION.count[i] = 0.0;
       l->prof_PRECISION.flop[i] = 0.0;
+      l->prof_PRECISION.name[i][0] = '\0';
     }
     
     double level_ratio = 1;
@@ -84,6 +85,9 @@ void prof_PRECISION_init( level_struct *l ) {
     sprintf( l->prof_PRECISION.name[_HOPPING], "coarse,schur:  hop term PRECISION" );
     sprintf( l->prof_PRECISION.name[_NHOPPING], "coarse,schur: nhop term PRECISION" );
     sprintf( l->prof_PRECISION.name[_SOlV_NC], "coarse,slove: fgmres PRECISION" );
+    for ( int i=0; i<_NUM_PROF; i++ )
+      snprintf( l->prof_PRECISION.nvtx_name[i], sizeof(l->prof_PRECISION.nvtx_name[i]), "d%d %s", l->depth,
+                l->prof_PRECISION.name[i][0] != '\0' ? l->prof_PRECISION.name[i] : "timer" );
   }
 }
 
