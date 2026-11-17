@@ -1199,7 +1199,7 @@ void coarse_n_hopping_term_PRECISION_vectorized( vector_PRECISION out, vector_PR
 void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
   int fgmres_iters=0;
-  NVTX_MASTER_PUSH( threading, "d%d coarsest solve", l->depth );
+  NVTX_MASTER_PUSH( threading, "d%d odd-even GMRES", l->depth );
 
   SYNC_CORES(threading)
   PROF_PRECISION_START( _SC, threading );
