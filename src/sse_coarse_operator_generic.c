@@ -20,6 +20,7 @@
  */
 
 #include "main.h"
+#include "profiling.h"
 #include "proxies/interpolation_proxy_PRECISION.h"
 #include "vectorization_dirac_PRECISION.h"
 
@@ -776,6 +777,14 @@ void coarse_block_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi
 void apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
                                       level_struct *l, struct Thread *threading ) {
 #ifdef CUDA_OPT
+  if ( cuda_coarse_operator_on_gpu_PRECISION( op, l ) ) {
+    NVTX_MASTER_PUSH( threading, "d%d coarse operator (GPU)", l->depth );
+    PROF_PRECISION_START( _NC, threading );
+    cuda_apply_coarse_operator_PRECISION_vectorwrapper( eta, phi, op, l, threading );
+    PROF_PRECISION_STOP( _NC, 1, threading );
+    NVTX_MASTER_POP( threading );
+    return;
+  }
   apply_coarse_operator_PRECISION_cpu( eta, phi, op, l, threading );
 }
 
