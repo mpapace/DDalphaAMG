@@ -2,6 +2,7 @@
 #include <cublas_v2.h>
 #include <complex>
 #include <vector>
+#include <algorithm>
 
 extern "C"{
 
@@ -636,5 +637,74 @@ extern "C" int cuda_coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, 
   SYNC_MASTER_TO_ALL(threading)
   return ((int*)threading->workspace)[0];
 }
+
+#ifdef CUDA_PIECE_BENCHMARK
+// Benchmark of the pieces of a coarse level on the GPU (build with -DCUDA_PIECE_BENCHMARK), called by
+// one thread after the solve (buffers overwritten). in_h: host vector (inner sites) used as input;
+// p: GMRES struct of the odd-even smoother of the level (its b and x are overwritten).
+// Timed with MPI_Wtime after a barrier, t (ms, medians over reps):
+//   t[0] Schur complement, GPU vectors          t[4] Schur complement, host vectors (with copies)
+//   t[1] coarse operator, GPU vectors           t[5] coarse operator, host vectors (with copies)
+//   t[2] first + last step of the smoother      t[6] whole odd-even smoother, host vectors
+//   t[3] GMRES of the smoother, GPU vectors          (cuda_coarse_solve_odd_even_PRECISION)
+extern "C" void cuda_coarse_oddeven_PRECISION_bench( gmres_PRECISION_struct *p, vector_PRECISION in_h,
+                                                     vector_PRECISION out_h, level_struct *l, int reps, double *t ) {
+
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION), *sop = &(l->s_PRECISION.op);
+  const size_t inner = (size_t)l->inner_vector_size;
+  std::vector<double> tm[7];
+  auto median = []( std::vector<double> &v ) { std::sort( v.begin(), v.end() ); return v[ v.size()/2 ]; };
+
+  if ( op->gmres_b_gpu == NULL ) {
+    CUDA_MALLOC( op->gmres_b_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_MALLOC( op->gmres_x_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_MALLOC( op->gmres_r_gpu, cu_cmplx_PRECISION, l->vector_size );
+  }
+  cuda_safe_call( cudaMemcpy( op->coarse_in_gpu, in_h, inner*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_safe_call( cudaMemcpy( sop->coarse_in_gpu, in_h, inner*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  int igz = p->initial_guess_zero;
+
+  for ( int r=0; r<reps; r++ ) {
+    double t0;
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_apply_schur_complement_PRECISION( op->coarse_out_gpu, op->coarse_in_gpu, op, l );
+    tm[0].push_back( 1e3*( MPI_Wtime() - t0 ) );
+
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_apply_coarse_operator_PRECISION( sop->coarse_out_gpu, sop->coarse_in_gpu, sop, l );
+    tm[1].push_back( 1e3*( MPI_Wtime() - t0 ) );
+
+    // b = input; first step, GMRES, last step (as cuda_coarse_solve_odd_even_PRECISION, no copies)
+    cuda_safe_call( cudaMemcpy( op->gmres_b_gpu, op->coarse_in_gpu, inner*sizeof(cu_cmplx_PRECISION),
+                                cudaMemcpyDeviceToDevice ) );
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_solve_odd_even_prepare_PRECISION( op->gmres_x_gpu, op->gmres_b_gpu, op, l );
+    double t_prep = 1e3*( MPI_Wtime() - t0 );
+    p->initial_guess_zero = _NO_RES;
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_gmres_PRECISION( p, op, l, op->gmres_x_gpu, op->gmres_b_gpu );
+    tm[3].push_back( 1e3*( MPI_Wtime() - t0 ) );
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_solve_odd_even_finish_PRECISION( op->gmres_x_gpu, op->gmres_b_gpu, op, l );
+    tm[2].push_back( t_prep + 1e3*( MPI_Wtime() - t0 ) );
+
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( out_h, in_h, op, l, no_threading );
+    tm[4].push_back( 1e3*( MPI_Wtime() - t0 ) );
+
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_apply_coarse_operator_PRECISION_vectorwrapper( out_h, in_h, sop, l, no_threading );
+    tm[5].push_back( 1e3*( MPI_Wtime() - t0 ) );
+
+    memcpy( p->b, in_h, inner*sizeof(complex_PRECISION) );
+    p->initial_guess_zero = _NO_RES;
+    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
+    cuda_coarse_solve_odd_even_PRECISION( p, op, l, no_threading );
+    tm[6].push_back( 1e3*( MPI_Wtime() - t0 ) );
+  }
+  p->initial_guess_zero = igz;
+  for ( int i=0; i<7; i++ ) t[i] = median( tm[i] );
+}
+#endif
 
 #endif
