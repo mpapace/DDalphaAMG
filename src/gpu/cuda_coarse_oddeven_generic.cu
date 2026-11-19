@@ -122,20 +122,26 @@ static inline unsigned int cuda_coarse_oddeven_grid_PRECISION( size_t num_thread
 }
 
 
-extern "C" int cuda_coarse_oddeven_on_gpu_PRECISION( level_struct *l ) {
+extern "C" int cuda_coarse_operator_on_gpu_PRECISION( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
-  return ( l->depth > 0 && l->level > 0 && l->oe_op_PRECISION.D_vectorized_gpu != NULL );
+  return ( l->depth > 0 && l->level > 0 && op->D_vectorized_gpu != NULL );
 #else
   return 0;
 #endif
 }
 
 
-extern "C" void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l ) {
+extern "C" int cuda_coarse_oddeven_on_gpu_PRECISION( level_struct *l ) {
+  return cuda_coarse_operator_on_gpu_PRECISION( &(l->oe_op_PRECISION), l );
+}
+
+
+// GPU copy of a coarse operator in the vectorized layout (l->oe_op_PRECISION or l->s_PRECISION.op):
+// couplings of the inner sites, neighbor tables, ghost exchange as in op->c, four vectors
+extern "C" void cuda_coarse_operator_PRECISION_alloc( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
   if ( l->depth == 0 || l->level == 0 ) return;
 
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
   int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
   size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
 
@@ -153,7 +159,7 @@ extern "C" void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l ) {
   cuda_safe_call( cudaMemcpy( op->neighbor_fw_gpu, op->neighbor_table, 5*n*sizeof(int), cudaMemcpyHostToDevice ) );
   cuda_safe_call( cudaMemcpy( op->neighbor_bw_gpu, op->backward_neighbor_table, 5*n*sizeof(int), cudaMemcpyHostToDevice ) );
 
-  // communication: same ghost layout as op->c (see coarse_oddeven_setup_PRECISION)
+  // communication: same ghost layout as op->c
   cuda_ghost_alloc_PRECISION( 0, &(op->cuda_c), l );
   for ( int i=0; i<8; i++ ) {
     op->cuda_c.comm_start[i] = op->c.comm_start[i];
@@ -166,21 +172,26 @@ extern "C" void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l ) {
     int bs = 1;
     for ( int nu=0; nu<4; nu++ )
       if ( nu != mu ) bs *= l->local_lattice[nu];
-    // as for op->c, the same table in both directions
     CUDA_MALLOC( op->cuda_c.boundary_table_gpu[2*mu], int, bs );
     cuda_safe_call( cudaMemcpy( op->cuda_c.boundary_table_gpu[2*mu], op->c.boundary_table[2*mu], bs*sizeof(int),
                                 cudaMemcpyHostToDevice ) );
-    op->cuda_c.boundary_table_gpu[2*mu+1] = op->cuda_c.boundary_table_gpu[2*mu];
+    if ( op->c.boundary_table[2*mu+1] == op->c.boundary_table[2*mu] ) {
+      // same table in both directions (odd-even operator)
+      op->cuda_c.boundary_table_gpu[2*mu+1] = op->cuda_c.boundary_table_gpu[2*mu];
+    } else {
+      CUDA_MALLOC( op->cuda_c.boundary_table_gpu[2*mu+1], int, bs );
+      cuda_safe_call( cudaMemcpy( op->cuda_c.boundary_table_gpu[2*mu+1], op->c.boundary_table[2*mu+1], bs*sizeof(int),
+                                  cudaMemcpyHostToDevice ) );
+    }
   }
 
-  cuda_coarse_oddeven_PRECISION_op_to_gpu( l );
+  cuda_coarse_operator_PRECISION_op_to_gpu( op, l );
 #endif
 }
 
 
-extern "C" void cuda_coarse_oddeven_PRECISION_op_to_gpu( level_struct *l ) {
+extern "C" void cuda_coarse_operator_PRECISION_op_to_gpu( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
   if ( op->D_vectorized_gpu == NULL ) return;
 
   int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
@@ -196,9 +207,8 @@ extern "C" void cuda_coarse_oddeven_PRECISION_op_to_gpu( level_struct *l ) {
 }
 
 
-extern "C" void cuda_coarse_oddeven_PRECISION_free( level_struct *l ) {
+extern "C" void cuda_coarse_operator_PRECISION_free( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
   if ( op->D_vectorized_gpu == NULL ) return;
 
   int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
@@ -219,10 +229,27 @@ extern "C" void cuda_coarse_oddeven_PRECISION_free( level_struct *l ) {
     int bs = 1;
     for ( int nu=0; nu<4; nu++ )
       if ( nu != mu ) bs *= l->local_lattice[nu];
-    CUDA_FREE( op->cuda_c.boundary_table_gpu[2*mu], int, bs );
+    if ( op->cuda_c.boundary_table_gpu[2*mu+1] != op->cuda_c.boundary_table_gpu[2*mu] )
+      CUDA_FREE( op->cuda_c.boundary_table_gpu[2*mu+1], int, bs );
     op->cuda_c.boundary_table_gpu[2*mu+1] = NULL;
+    CUDA_FREE( op->cuda_c.boundary_table_gpu[2*mu], int, bs );
   }
 #endif
+}
+
+
+extern "C" void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l ) {
+  cuda_coarse_operator_PRECISION_alloc( &(l->oe_op_PRECISION), l );
+}
+
+
+extern "C" void cuda_coarse_oddeven_PRECISION_op_to_gpu( level_struct *l ) {
+  cuda_coarse_operator_PRECISION_op_to_gpu( &(l->oe_op_PRECISION), l );
+}
+
+
+extern "C" void cuda_coarse_oddeven_PRECISION_free( level_struct *l ) {
+  cuda_coarse_operator_PRECISION_free( &(l->oe_op_PRECISION), l );
 }
 
 

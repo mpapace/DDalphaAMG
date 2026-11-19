@@ -2,12 +2,19 @@
 #define CUDA_COARSE_ODDEVEN_PRECISION_HEADER
 
 #ifdef CUDA_OPT
-  // odd-even operator of a coarse level on the GPU (l->oe_op_PRECISION, depth > 0, not the coarsest level),
-  // in the vectorized layout of D_vectorized, D_transformed_vectorized and clover_vectorized
-  // (VECTORIZE_COARSE_OPERATOR_PRECISION, i.e. SSE builds in single precision)
+  // operators of a coarse level on the GPU (depth > 0, not the coarsest level): the odd-even operator
+  // l->oe_op_PRECISION and the operator l->s_PRECISION.op, in the vectorized layout of D_vectorized,
+  // D_transformed_vectorized and clover_vectorized (VECTORIZE_COARSE_OPERATOR_PRECISION, i.e. SSE builds
+  // in single precision)
 
-  // 1 if the odd-even operator of this level is applied on the GPU
+  // 1 if the operator (odd-even operator of this level) is applied on the GPU
+  int  cuda_coarse_operator_on_gpu_PRECISION( operator_PRECISION_struct *op, level_struct *l );
   int  cuda_coarse_oddeven_on_gpu_PRECISION( level_struct *l );
+
+  // data of a coarse operator in the vectorized layout on the GPU (one thread)
+  void cuda_coarse_operator_PRECISION_alloc( operator_PRECISION_struct *op, level_struct *l );
+  void cuda_coarse_operator_PRECISION_op_to_gpu( operator_PRECISION_struct *op, level_struct *l );
+  void cuda_coarse_operator_PRECISION_free( operator_PRECISION_struct *op, level_struct *l );
 
   // data on the GPU (called by coarse_oddeven_setup_PRECISION, coarse_oddeven_re_setup_PRECISION
   // and coarse_oddeven_free_PRECISION, one thread)
