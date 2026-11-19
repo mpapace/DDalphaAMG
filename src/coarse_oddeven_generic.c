@@ -1320,6 +1320,16 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
 
 void coarse_apply_schur_complement_PRECISION( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
+#ifdef CUDA_OPT
+  if ( op == &(l->oe_op_PRECISION) && cuda_coarse_oddeven_on_gpu_PRECISION( l ) ) {
+    NVTX_MASTER_PUSH( threading, "d%d Schur complement (GPU)", l->depth );
+    PROF_PRECISION_START( _NC, threading );
+    cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( out, in, op, l, threading );
+    PROF_PRECISION_STOP( _NC, 1, threading );
+    NVTX_MASTER_POP( threading );
+    return;
+  }
+#endif
   coarse_apply_schur_complement_PRECISION_cpu( out, in, op, l, threading );
 }
 
