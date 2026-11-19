@@ -729,6 +729,29 @@ __global__ void cuda_fine_residual_PRECISION_kernel( cu_cmplx_PRECISION *r, cons
 // vectors. Returns 1 if the residual was computed here (r is then on the host, or in op->x_gpu
 // if keep_on_gpu), 0 if the caller
 // has to compute it. Called by all threads; the tags are consumed in both cases.
+// r = eta - D phi on the GPU, with phi and eta in the buffers of the interpolation (phi_gpu, eta_gpu),
+// r in op->x_gpu (free at this point); asynchronous (default stream)
+static void cuda_fine_residual_core_PRECISION( operator_PRECISION_struct *op, level_struct *l,
+                                               struct Thread *threading ) {
+  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
+  const size_t n_sites = (size_t)l->num_inner_lattice_sites,
+               nsv     = (size_t)l->num_lattice_site_var,
+               n_fine  = (size_t)l->inner_vector_size;
+  const unsigned int block = 128;
+
+  // phi (ordering of the Schwarz operator, site by site) -> component-wise, D phi, back
+  reorderArrayByComponent<<< minGridSizeForN( n_sites, block ), block >>>( op->x_componentwise_gpu, is->phi_gpu,
+                                                                           nsv, n_sites );
+  cuda_safe_call( cudaDeviceSynchronize() );
+  cuda_d_plus_clover_PRECISION( op->w_componentwise_gpu, op->x_componentwise_gpu, op, l, threading );
+  reorderArrayByChunks<<< minGridSizeForN( n_sites, block ), block >>>( op->w_gpu, op->w_componentwise_gpu,
+                                                                        nsv, n_sites );
+  cuda_fine_residual_PRECISION_kernel<<< minGridSizeForN( n_fine, 256 ), 256 >>>( op->x_gpu, is->eta_gpu,
+                                                                                 op->w_gpu, n_fine );
+  cuda_check_error( _SOFT_CHECK );
+}
+
+
 extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISION phi, vector_PRECISION eta,
                                              operator_PRECISION_struct *op, level_struct *l,
                                              struct Thread *threading, int keep_on_gpu ) {
@@ -760,22 +783,8 @@ extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISIO
     is->eta_stale_host = NULL;
   }
   if ( use ) {
-    const size_t n_sites = (size_t)l->num_inner_lattice_sites,
-                 nsv     = (size_t)l->num_lattice_site_var,
-                 n_fine  = (size_t)l->inner_vector_size;
-    const unsigned int block = 128;
-
-    // phi (ordering of the Schwarz operator, site by site) -> component-wise, D phi, back
-    reorderArrayByComponent<<< minGridSizeForN( n_sites, block ), block >>>( op->x_componentwise_gpu, is->phi_gpu,
-                                                                             nsv, n_sites );
-    cuda_safe_call( cudaDeviceSynchronize() );
-    cuda_d_plus_clover_PRECISION( op->w_componentwise_gpu, op->x_componentwise_gpu, op, l, threading );
-    reorderArrayByChunks<<< minGridSizeForN( n_sites, block ), block >>>( op->w_gpu, op->w_componentwise_gpu,
-                                                                          nsv, n_sites );
-    // r = eta - D phi, in op->x_gpu (free at this point)
-    cuda_fine_residual_PRECISION_kernel<<< minGridSizeForN( n_fine, 256 ), 256 >>>( op->x_gpu, is->eta_gpu,
-                                                                                   op->w_gpu, n_fine );
-    cuda_check_error( _SOFT_CHECK );
+    const size_t n_fine = (size_t)l->inner_vector_size;
+    cuda_fine_residual_core_PRECISION( op, l, threading );
     if ( keep_on_gpu ) {
       // r stays in op->x_gpu for the odd-even part of the smoother (cuda_smoother_oe_prepare)
       cuda_safe_call( cudaDeviceSynchronize() );
