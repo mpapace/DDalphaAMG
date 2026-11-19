@@ -401,4 +401,46 @@ extern "C" void cuda_apply_coarse_operator_PRECISION_vectorwrapper( vector_PRECI
   SYNC_MASTER_TO_ALL(threading)
 }
 
+// first step of coarse_solve_odd_even_PRECISION on host vectors (called by all threads):
+// x_o = D_oo^{-1} b_o, then b_e = b_e + (coarse_n_hopping_term) x_o
+extern "C" void cuda_coarse_solve_odd_even_prepare_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
+                                                                            operator_PRECISION_struct *op,
+                                                                            level_struct *l, struct Thread *threading ) {
+  int n_even = op->num_even_sites, n_odd = op->num_odd_sites;
+  size_t even_size = (size_t)n_even*l->num_lattice_site_var, odd_size = (size_t)n_odd*l->num_lattice_site_var;
+  cuda_vector_PRECISION x_gpu = op->coarse_in_gpu, b_gpu = op->coarse_out_gpu;
+
+  SYNC_CORES(threading)
+  START_MASTER(threading)
+  cuda_safe_call( cudaMemcpy( b_gpu, b, (even_size+odd_size)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_coarse_self_couplings_PRECISION( x_gpu, b_gpu, n_even, n_even+n_odd, op, l );
+  cuda_coarse_pn_hopping_term_PRECISION( b_gpu, x_gpu, op, _EVEN_SITES, -1, l );
+  cuda_safe_call( cudaMemcpy( x+even_size, x_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  cuda_safe_call( cudaMemcpy( b, b_gpu, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  END_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+}
+
+
+// last step of coarse_solve_odd_even_PRECISION on host vectors (called by all threads):
+// b_o = b_o + (coarse_n_hopping_term) x_e, then x_o = D_oo^{-1} b_o
+extern "C" void cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
+                                                                           operator_PRECISION_struct *op,
+                                                                           level_struct *l, struct Thread *threading ) {
+  int n_even = op->num_even_sites, n_odd = op->num_odd_sites;
+  size_t even_size = (size_t)n_even*l->num_lattice_site_var, odd_size = (size_t)n_odd*l->num_lattice_site_var;
+  cuda_vector_PRECISION x_gpu = op->coarse_in_gpu, b_gpu = op->coarse_out_gpu;
+
+  SYNC_CORES(threading)
+  START_MASTER(threading)
+  cuda_safe_call( cudaMemcpy( x_gpu, x, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_safe_call( cudaMemcpy( b_gpu+even_size, b+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_coarse_pn_hopping_term_PRECISION( b_gpu, x_gpu, op, _ODD_SITES, -1, l );
+  cuda_coarse_self_couplings_PRECISION( x_gpu, b_gpu, n_even, n_even+n_odd, op, l );
+  cuda_safe_call( cudaMemcpy( b+even_size, b_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  cuda_safe_call( cudaMemcpy( x+even_size, x_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  END_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+}
+
 #endif

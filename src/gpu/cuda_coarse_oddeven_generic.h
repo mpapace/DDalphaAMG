@@ -37,6 +37,13 @@
   void cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( vector_PRECISION out, vector_PRECISION in,
                                                                    operator_PRECISION_struct *op, level_struct *l,
                                                                    struct Thread *threading );
+  // first and last step of coarse_solve_odd_even_PRECISION (around its GMRES)
+  void cuda_coarse_solve_odd_even_prepare_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
+                                                                   operator_PRECISION_struct *op, level_struct *l,
+                                                                   struct Thread *threading );
+  void cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
+                                                                  operator_PRECISION_struct *op, level_struct *l,
+                                                                  struct Thread *threading );
   void cuda_apply_coarse_operator_PRECISION_vectorwrapper( vector_PRECISION eta, vector_PRECISION phi,
                                                            operator_PRECISION_struct *op, level_struct *l,
                                                            struct Thread *threading );

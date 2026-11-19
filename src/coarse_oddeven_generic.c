@@ -1224,12 +1224,23 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
   NVTX_MASTER_PUSH( threading, "d%d odd-even GMRES", l->depth );
 
   SYNC_CORES(threading)
+#ifdef CUDA_OPT
+  int on_gpu = ( op == &(l->oe_op_PRECISION) && cuda_coarse_oddeven_on_gpu_PRECISION( l ) );
+  if ( on_gpu ) {
+    PROF_PRECISION_START( _NC, threading );
+    cuda_coarse_solve_odd_even_prepare_PRECISION_vectorwrapper( p->x, p->b, op, l, threading );
+    PROF_PRECISION_STOP( _NC, 0, threading );
+  } else {
+#endif
   PROF_PRECISION_START( _SC, threading );
   coarse_diag_oo_inv_PRECISION( p->x, p->b, op, l, threading );
   PROF_PRECISION_STOP( _SC, 0, threading );
   PROF_PRECISION_START( _NC, threading );
   coarse_n_hopping_term_PRECISION( p->b, p->x, op, _EVEN_SITES, l, threading );
   PROF_PRECISION_STOP( _NC, 0, threading );
+#ifdef CUDA_OPT
+  }
+#endif
 
   int start, end;
   compute_core_start_end(p->v_start, p->v_end, &start, &end, l, threading);
@@ -1307,12 +1318,22 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
   //END_MASTER(threading)
 
   // even to odd
+#ifdef CUDA_OPT
+  if ( on_gpu ) {
+    PROF_PRECISION_START( _NC, threading );
+    cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( p->x, p->b, op, l, threading );
+    PROF_PRECISION_STOP( _NC, 1, threading );
+  } else {
+#endif
   PROF_PRECISION_START( _NC, threading );
   coarse_n_hopping_term_PRECISION( p->b, p->x, op, _ODD_SITES, l, threading );
   PROF_PRECISION_STOP( _NC, 1, threading );
   PROF_PRECISION_START( _SC, threading );
   coarse_diag_oo_inv_PRECISION( p->x, p->b, op, l, threading );
   PROF_PRECISION_STOP( _SC, 1, threading );
+#ifdef CUDA_OPT
+  }
+#endif
   SYNC_CORES(threading)
   NVTX_MASTER_POP( threading );
 }
