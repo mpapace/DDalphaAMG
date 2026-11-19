@@ -48,6 +48,10 @@
   void cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
                                                                   operator_PRECISION_struct *op, level_struct *l,
                                                                   struct Thread *threading );
+  // coarse_solve_odd_even_PRECISION (smoother of the coarse level) with the vectors on the GPU,
+  // returns the number of GMRES iterations
+  int  cuda_coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op,
+                                             level_struct *l, struct Thread *threading );
   void cuda_apply_coarse_operator_PRECISION_vectorwrapper( vector_PRECISION eta, vector_PRECISION phi,
                                                            operator_PRECISION_struct *op, level_struct *l,
                                                            struct Thread *threading );

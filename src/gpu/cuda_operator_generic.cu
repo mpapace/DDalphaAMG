@@ -36,6 +36,12 @@ void cuda_operator_PRECISION_init(operator_PRECISION_struct *op) {
   op->neighbor_bw_gpu = NULL;
   op->coarse_in_gpu = NULL;
   op->coarse_out_gpu = NULL;
+  op->gmres_V_gpu = NULL;
+  op->gmres_b_gpu = NULL;
+  op->gmres_x_gpu = NULL;
+  op->gmres_r_gpu = NULL;
+  op->gmres_h_gpu = NULL;
+  op->gmres_V_cols = 0;
 
   // Communication stuff
   for ( int i=0; i<8; i++ ) {

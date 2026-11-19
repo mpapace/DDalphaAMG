@@ -1,4 +1,7 @@
 #include <mpi.h>
+#include <cublas_v2.h>
+#include <complex>
+#include <vector>
 
 extern "C"{
 
@@ -224,6 +227,14 @@ extern "C" void cuda_coarse_operator_PRECISION_free( operator_PRECISION_struct *
   CUDA_FREE( op->coarse_out_gpu, cu_cmplx_PRECISION, l->vector_size );
   CUDA_FREE( op->buffer_gpu[0], cu_cmplx_PRECISION, l->vector_size );
   CUDA_FREE( op->buffer_gpu[1], cu_cmplx_PRECISION, l->vector_size );
+  if ( op->gmres_V_gpu != NULL ) {
+    CUDA_FREE( op->gmres_V_gpu, cu_cmplx_PRECISION, (size_t)op->gmres_V_cols*l->vector_size );
+    CUDA_FREE( op->gmres_b_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_FREE( op->gmres_x_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_FREE( op->gmres_r_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_FREE( op->gmres_h_gpu, cu_cmplx_PRECISION, op->gmres_V_cols );
+    op->gmres_V_cols = 0;
+  }
 
   cuda_ghost_free_PRECISION( &(op->cuda_c), l );
   for ( int mu=0; mu<4; mu++ ) {
@@ -455,6 +466,210 @@ extern "C" void cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( vecto
   cuda_safe_call( cudaMemcpy( x+even_size, x_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
   END_MASTER(threading)
   SYNC_MASTER_TO_ALL(threading)
+}
+
+#define CUBLAS_CHECK_COARSE(call)                                                 \
+  do {                                                                            \
+    cublasStatus_t st_ = (call);                                                  \
+    if ( st_ != CUBLAS_STATUS_SUCCESS ) {                                         \
+      fprintf( stderr, "cuBLAS error %d at %s:%d\n", (int)st_, __FILE__, __LINE__ ); \
+      MPI_Abort( MPI_COMM_WORLD, 1 );                                             \
+    }                                                                             \
+  } while (0)
+
+// cuBLAS calls for both precisions (overloads, so that this generic file works for float and double)
+static inline cublasStatus_t coarse_blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n,
+                                               const cuFloatComplex *alpha, const cuFloatComplex *A, int lda,
+                                               const cuFloatComplex *x, const cuFloatComplex *beta, cuFloatComplex *y ) {
+  return cublasCgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
+static inline cublasStatus_t coarse_blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n,
+                                               const cuDoubleComplex *alpha, const cuDoubleComplex *A, int lda,
+                                               const cuDoubleComplex *x, const cuDoubleComplex *beta, cuDoubleComplex *y ) {
+  return cublasZgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
+static inline cublasStatus_t coarse_blas_nrm2( cublasHandle_t h, int n, const cuFloatComplex *x, float *r ) {
+  return cublasScnrm2( h, n, x, 1, r ); }
+static inline cublasStatus_t coarse_blas_nrm2( cublasHandle_t h, int n, const cuDoubleComplex *x, double *r ) {
+  return cublasDznrm2( h, n, x, 1, r ); }
+static inline cublasStatus_t coarse_blas_rscal( cublasHandle_t h, int n, float a, cuFloatComplex *x ) {
+  return cublasCsscal( h, n, &a, x, 1 ); }
+static inline cublasStatus_t coarse_blas_rscal( cublasHandle_t h, int n, double a, cuDoubleComplex *x ) {
+  return cublasZdscal( h, n, &a, x, 1 ); }
+static inline cublasStatus_t coarse_blas_copy( cublasHandle_t h, int n, const cuFloatComplex *x, cuFloatComplex *y ) {
+  return cublasCcopy( h, n, x, 1, y, 1 ); }
+static inline cublasStatus_t coarse_blas_copy( cublasHandle_t h, int n, const cuDoubleComplex *x, cuDoubleComplex *y ) {
+  return cublasZcopy( h, n, x, 1, y, 1 ); }
+static inline cublasStatus_t coarse_blas_axpy( cublasHandle_t h, int n, const cuFloatComplex *a,
+                                               const cuFloatComplex *x, cuFloatComplex *y ) {
+  return cublasCaxpy( h, n, a, x, 1, y, 1 ); }
+static inline cublasStatus_t coarse_blas_axpy( cublasHandle_t h, int n, const cuDoubleComplex *a,
+                                               const cuDoubleComplex *x, cuDoubleComplex *y ) {
+  return cublasZaxpy( h, n, a, x, 1, y, 1 ); }
+
+static cublasHandle_t coarse_cublas_PRECISION = NULL;
+
+
+// GMRES on the Schur complement of the odd-even operator of a coarse level, entirely on the GPU:
+// b and x are the even sites of GPU vectors of length l->vector_size. Same algorithm as
+// fgmres_PRECISION for the depth > 0 smoother: no preconditioner, classical Gram-Schmidt (inner
+// products with v_0..v_j, then the norm of w), restart_length steps per restart, num_restart
+// restarts, stop if the estimated relative residual drops below p->tol. Inner products and norms
+// are reduced over the processes of the level on the host (MPI_Allreduce, as on the CPU); the small
+// Hessenberg problem is solved on the host. The basis vectors have ghost sites (the Schur complement
+// receives them), so their stride is l->vector_size.
+static int cuda_coarse_gmres_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op, level_struct *l,
+                                        cu_cmplx_PRECISION *x, cu_cmplx_PRECISION *b ) {
+
+  typedef std::complex<double> cd;
+  const int m = p->restart_length;
+  const int n = op->num_even_sites * l->num_lattice_site_var;
+  const int ld = l->vector_size;
+  MPI_Comm comm = l->gs_PRECISION.level_comm;
+
+  if ( coarse_cublas_PRECISION == NULL ) {
+    CUBLAS_CHECK_COARSE( cublasCreate( &coarse_cublas_PRECISION ) );
+    CUBLAS_CHECK_COARSE( cublasSetPointerMode( coarse_cublas_PRECISION, CUBLAS_POINTER_MODE_HOST ) );
+  }
+  cublasHandle_t h = coarse_cublas_PRECISION;
+  if ( op->gmres_V_cols < m+1 ) {
+    if ( op->gmres_V_gpu != NULL ) {
+      CUDA_FREE( op->gmres_V_gpu, cu_cmplx_PRECISION, (size_t)op->gmres_V_cols*ld );
+      CUDA_FREE( op->gmres_h_gpu, cu_cmplx_PRECISION, op->gmres_V_cols );
+    }
+    CUDA_MALLOC( op->gmres_V_gpu, cu_cmplx_PRECISION, (size_t)(m+1)*ld );
+    CUDA_MALLOC( op->gmres_h_gpu, cu_cmplx_PRECISION, m+1 );
+    op->gmres_V_cols = m+1;
+  }
+
+  cu_cmplx_PRECISION *V = op->gmres_V_gpu, *r = op->gmres_r_gpu, *hd = op->gmres_h_gpu;
+  const cu_cmplx_PRECISION one = make_cu_cmplx_PRECISION(1,0), zero = make_cu_cmplx_PRECISION(0,0),
+                           mone = make_cu_cmplx_PRECISION(-1,0);
+  std::vector<cd> H( (size_t)m*(m+1) ), gam( m+1 ), sn( m ), cs( m ), y( m );
+  std::vector<cu_cmplx_PRECISION> hloc( m+1 ), hglob( m+1 );
+  auto Hc = [&]( int col, int row ) -> cd& { return H[ (size_t)col*(m+1) + row ]; };   // H[j][i] of the CPU code
+
+  // global 2-norm over the even sites of all the processes of the level
+  auto global_norm = [&]( const cu_cmplx_PRECISION *v ) -> double {
+    PRECISION nl = 0;
+    CUBLAS_CHECK_COARSE( coarse_blas_nrm2( h, n, v, &nl ) );
+    PRECISION sq = nl*nl, sq_glob = sq;
+    if ( g.num_processes > 1 )
+      MPI_Allreduce( &sq, &sq_glob, 1, MPI_PRECISION, MPI_SUM, comm );
+    return sqrt( (double)sq_glob );
+  };
+
+  double norm_r0 = 1, gamma_jp1 = 1;
+  int finish = 0, iter = 0, j = -1;
+
+  for ( int ol=0; ol<p->num_restart && finish==0; ol++ ) {
+    int res;
+    if ( ol == 0 && p->initial_guess_zero ) {
+      res = _NO_RES;
+      CUBLAS_CHECK_COARSE( coarse_blas_copy( h, n, b, r ) );                    // r = b
+    } else {
+      res = _RES;
+      cuda_coarse_apply_schur_complement_PRECISION( r, x, op, l );             // r = S x
+      CUBLAS_CHECK_COARSE( coarse_blas_rscal( h, n, (PRECISION)(-1.0), r ) );  // r = b - S x
+      CUBLAS_CHECK_COARSE( coarse_blas_axpy( h, n, &one, b, r ) );
+    }
+    double gamma0 = global_norm( r );
+    gam[0] = gamma0;
+    if ( ol == 0 ) norm_r0 = gamma0;
+    CUBLAS_CHECK_COARSE( coarse_blas_copy( h, n, r, V ) );                      // v_0 = r / gamma_0
+    CUBLAS_CHECK_COARSE( coarse_blas_rscal( h, n, (PRECISION)(1.0/gamma0), V ) );
+
+    for ( int il=0; il<m && finish==0; il++ ) {
+      j = il; iter++;
+      cu_cmplx_PRECISION *vj = V + (size_t)j*ld, *w = V + (size_t)(j+1)*ld;    // w is built in place of v_{j+1}
+
+      cuda_coarse_apply_schur_complement_PRECISION( w, vj, op, l );            // w = S v_j
+
+      // h_i = <v_i, w>, i = 0..j, reduced over the processes
+      CUBLAS_CHECK_COARSE( coarse_blas_gemv( h, CUBLAS_OP_C, n, j+1, &one, V, ld, w, &zero, hd ) );
+      cuda_safe_call( cudaMemcpy( hloc.data(), hd, (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+      if ( g.num_processes > 1 )
+        MPI_Allreduce( hloc.data(), hglob.data(), j+1, MPI_COMPLEX_PRECISION, MPI_SUM, comm );
+      else
+        hglob = hloc;
+      for ( int i=0; i<=j; i++ ) Hc(j,i) = cd( hglob[i].x, hglob[i].y );
+
+      // w = w - sum_i h_i v_i  (classical Gram-Schmidt, as on the CPU)
+      cuda_safe_call( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+      CUBLAS_CHECK_COARSE( coarse_blas_gemv( h, CUBLAS_OP_N, n, j+1, &mone, V, ld, hd, &one, w ) );
+
+      // h_{j+1} = ||w||, v_{j+1} = w / h_{j+1}
+      double hn = global_norm( w );
+      Hc(j,j+1) = hn;
+      if ( hn > 1e-15 ) CUBLAS_CHECK_COARSE( coarse_blas_rscal( h, n, (PRECISION)(1.0/hn), w ) );
+
+      if ( std::abs( Hc(j,j+1) ) > p->tol/10 ) {
+        // Givens rotations (qr_update_PRECISION)
+        for ( int i=0; i<j; i++ ) {
+          cd beta = (-sn[i])*Hc(j,i) + cs[i]*Hc(j,i+1);
+          Hc(j,i) = std::conj(cs[i])*Hc(j,i) + std::conj(sn[i])*Hc(j,i+1);
+          Hc(j,i+1) = beta;
+        }
+        double beta = sqrt( std::norm( Hc(j,j) ) + std::norm( Hc(j,j+1) ) );
+        sn[j] = Hc(j,j+1)/beta; cs[j] = Hc(j,j)/beta;
+        gam[j+1] = (-sn[j])*gam[j]; gam[j] = std::conj(cs[j])*gam[j];
+        Hc(j,j) = beta; Hc(j,j+1) = 0;
+        gamma_jp1 = std::abs( gam[j+1] );
+        if ( gamma_jp1/norm_r0 < p->tol || gamma_jp1/norm_r0 > 1E+5 ) {
+          finish = 1;
+          if ( gamma_jp1/norm_r0 > 1E+5 ) printf0("Divergence of cuda_coarse_gmres_PRECISION, iter = %d\n", iter );
+        }
+      } else {
+        printf0("depth: %d, iter: %d, coarse smoother GMRES (GPU) H(%d,%d) = %+lf+%lfi\n", l->depth, iter, j+1, j,
+                Hc(j,j+1).real(), Hc(j,j+1).imag() );
+        finish = 1;
+        break;
+      }
+    }
+
+    // x = x + sum_i y_i v_i (or x = sum_i y_i v_i after a zero initial guess): compute_solution_PRECISION
+    for ( int i=j; i>=0; i-- ) {
+      y[i] = gam[i];
+      for ( int k=i+1; k<=j; k++ ) y[i] -= Hc(k,i)*y[k];
+      y[i] /= Hc(i,i);
+    }
+    for ( int i=0; i<=j; i++ ) hglob[i] = make_cu_cmplx_PRECISION( (PRECISION)y[i].real(), (PRECISION)y[i].imag() );
+    cuda_safe_call( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+    int add = ( res == _NO_RES ) ? ol : 1;
+    CUBLAS_CHECK_COARSE( coarse_blas_gemv( h, CUBLAS_OP_N, n, j+1, &one, V, ld, hd, add ? &one : &zero, x ) );
+  }
+  cuda_safe_call( cudaDeviceSynchronize() );
+  return iter;
+}
+
+
+// coarse_solve_odd_even_PRECISION with the vectors on the GPU (called by all threads): copy of b
+// (and of x if the initial guess is not zero) to the GPU, first step, GMRES on the Schur complement,
+// last step, copy of x to the host. p->b is not updated on the host (the callers only use p->x).
+// Returns the number of GMRES iterations.
+extern "C" int cuda_coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op,
+                                                     level_struct *l, struct Thread *threading ) {
+  int iter = 0;
+  size_t inner_size = (size_t)l->inner_vector_size,
+         even_size = (size_t)op->num_even_sites*l->num_lattice_site_var;
+
+  SYNC_CORES(threading)
+  START_MASTER(threading)
+  if ( op->gmres_b_gpu == NULL ) {
+    CUDA_MALLOC( op->gmres_b_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_MALLOC( op->gmres_x_gpu, cu_cmplx_PRECISION, l->vector_size );
+    CUDA_MALLOC( op->gmres_r_gpu, cu_cmplx_PRECISION, l->vector_size );
+  }
+  cu_cmplx_PRECISION *x = op->gmres_x_gpu, *b = op->gmres_b_gpu;
+  cuda_safe_call( cudaMemcpy( b, p->b, inner_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  if ( !p->initial_guess_zero )
+    cuda_safe_call( cudaMemcpy( x, p->x, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_coarse_solve_odd_even_prepare_PRECISION( x, b, op, l );
+  iter = cuda_coarse_gmres_PRECISION( p, op, l, x, b );
+  cuda_coarse_solve_odd_even_finish_PRECISION( x, b, op, l );
+  cuda_safe_call( cudaMemcpy( p->x, x, inner_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  ((int*)threading->workspace)[0] = iter;
+  END_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+  return ((int*)threading->workspace)[0];
 }
 
 #endif

@@ -70,6 +70,10 @@ typedef struct
     OPERATOR_TYPE_PRECISION *D_vectorized_gpu, *D_transformed_vectorized_gpu, *clover_vectorized_gpu;
     int *neighbor_fw_gpu, *neighbor_bw_gpu;
     cuda_vector_PRECISION coarse_in_gpu, coarse_out_gpu;
+    // GMRES of the odd-even smoother of a coarse level on the GPU: basis (gmres_V_cols columns of
+    // l->vector_size entries), right-hand side, solution, residual and small vector
+    cuda_vector_PRECISION gmres_V_gpu, gmres_b_gpu, gmres_x_gpu, gmres_r_gpu, gmres_h_gpu;
+    int gmres_V_cols;
 #endif
     int oe_offset, self_coupling, num_even_sites, num_odd_sites,
         *index_table,
