@@ -62,6 +62,14 @@ typedef struct
 
     /** \see neighbor_table */
     int * neighbor_table_gpu;
+
+    // odd-even operator of a coarse level (depth > 0) on the GPU, see gpu/cuda_coarse_oddeven_generic.cu:
+    // copies of D_vectorized, D_transformed_vectorized and clover_vectorized (same layout),
+    // of the first 5*num_inner_lattice_sites entries of neighbor_table and backward_neighbor_table,
+    // and two vectors (with ghost sites) for the copies of the input and output of the host vectors
+    OPERATOR_TYPE_PRECISION *D_vectorized_gpu, *D_transformed_vectorized_gpu, *clover_vectorized_gpu;
+    int *neighbor_fw_gpu, *neighbor_bw_gpu;
+    cuda_vector_PRECISION coarse_in_gpu, coarse_out_gpu;
 #endif
     int oe_offset, self_coupling, num_even_sites, num_odd_sites,
         *index_table,

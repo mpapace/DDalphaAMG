@@ -8,140 +8,131 @@ extern "C"{
 
 }
 
+#include "cuda_ghost_PRECISION.h"
+
 #ifdef CUDA_OPT
 
+// Odd-even operator of a coarse level (depth > 0) on the GPU.
+//
+// The data are copies of the ones used by the CPU code with VECTORIZE_COARSE_OPERATOR_PRECISION
+// (see coarse_oddeven_setup_PRECISION_set_couplings): per site, D_vectorized holds the four links
+// U_mu(x), D_transformed_vectorized the four links of the backward couplings, and clover_vectorized
+// the self coupling on the even sites and its inverse on the odd sites. Each one is a dense
+// n x n complex matrix (n = l->num_lattice_site_var), stored column by column: the real parts of
+// column j at A[2*j*lda + i] and its imaginary parts at A[(2*j+1)*lda + i], i = 0..n-1, with
+// lda = n rounded up to a multiple of SIMD_LENGTH_PRECISION (see cgemv and cgenmv in sse_blas_vectorized.h).
 
-extern "C" void copy_2_cpu_PRECISION( vector_PRECISION out, cuda_vector_PRECISION out_gpu, vector_PRECISION in, cuda_vector_PRECISION in_gpu, level_struct *l){
-  cudaStream_t *streams_gmres = (l->p_PRECISION).streams;
 
-  cuda_vector_PRECISION_copy( (void*)out, (void*)out_gpu, 0, l->vector_size, l, _D2H, _CUDA_SYNC,
-                              0, streams_gmres );
-  cuda_vector_PRECISION_copy( (void*)in, (void*)in_gpu, 0, l->vector_size, l, _D2H, _CUDA_SYNC,
-                              0, streams_gmres );
+static inline int cuda_coarse_oddeven_lda_PRECISION( level_struct *l ) {
+#ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
+  return SIMD_LENGTH_PRECISION*((l->num_lattice_site_var+SIMD_LENGTH_PRECISION-1)/SIMD_LENGTH_PRECISION);
+#else
+  return l->num_lattice_site_var;
+#endif
 }
 
 
-extern "C" void coarse_apply_schur_complement_PRECISION_CUDA( cuda_vector_PRECISION out_gpu, cuda_vector_PRECISION in_gpu, 
-                                                              operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
-
-  // TODO : finish all of the CUDA kernels associated to this function
-
-  // start and end indices for vector functions depending on thread
-  int start;
-  int end;
-  // compute start and end indices for core
-  // this puts zero for all other hyperthreads, so we can call functions below with all hyperthreads
-  compute_core_start_end(op->num_even_sites*l->num_lattice_site_var, l->inner_vector_size, &start, &end, l, threading);
-
-  vector_PRECISION *tmp = op->buffer;
-
-  vector_PRECISION out=NULL, in=NULL;
-  out = (complex_PRECISION*) malloc( l->vector_size * sizeof(complex_PRECISION) );
-  in = (complex_PRECISION*) malloc( l->vector_size * sizeof(complex_PRECISION) );
-
-  cudaStream_t *streams_gmres = (l->p_PRECISION).streams;
-
-  SYNC_CORES(threading)
-  PROF_PRECISION_START( _SC, threading );
-
-  // 1. 
-
-  coarse_diag_ee_PRECISION_CUDA( out_gpu, in_gpu, op, l, threading );
-  cudaDeviceSynchronize();
-
-  copy_2_cpu_PRECISION(out, out_gpu, in, in_gpu, l);
-
-  PROF_PRECISION_STOP( _SC, 0, threading );
-  SYNC_CORES(threading)
-
-  vector_PRECISION_define( tmp[0], 0, start, end, l );
-
-  cudaDeviceSynchronize();
-
-  SYNC_CORES(threading)
-  PROF_PRECISION_START( _NC, threading );
-
-  coarse_hopping_term_PRECISION( tmp[0], in, op, _ODD_SITES, l, threading );
-
-  cudaDeviceSynchronize();
-
-  PROF_PRECISION_STOP( _NC, 0, threading );
-  PROF_PRECISION_START( _SC, threading );
-
-  coarse_diag_oo_inv_PRECISION( tmp[1], tmp[0], op, l, threading );
-
-  cudaDeviceSynchronize();
-
-  PROF_PRECISION_STOP( _SC, 1, threading );
-  PROF_PRECISION_START( _NC, threading );
-
-  coarse_n_hopping_term_PRECISION( out, tmp[1], op, _EVEN_SITES, l, threading );
-
-  cudaDeviceSynchronize();
-
-  PROF_PRECISION_STOP( _NC, 1, threading );
-
-  cuda_vector_PRECISION_copy( (void*)out_gpu, (void*)out, 0, l->vector_size, l, _H2D, _CUDA_SYNC,
-                              threading->core, streams_gmres );
-  cuda_vector_PRECISION_copy( (void*)in_gpu, (void*)in, 0, l->vector_size, l, _H2D, _CUDA_SYNC,
-                              threading->core, streams_gmres );
-
-  free(out);
-  free(in);
+extern "C" int cuda_coarse_oddeven_on_gpu_PRECISION( level_struct *l ) {
+#ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
+  return ( l->depth > 0 && l->level > 0 && l->oe_op_PRECISION.D_vectorized_gpu != NULL );
+#else
+  return 0;
+#endif
 }
 
 
-extern "C" void coarse_self_couplings_PRECISION_CUDA( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi, cuda_config_PRECISION clover, 
-                                                      int length, level_struct *l, struct Thread *threading ){
+extern "C" void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l ) {
+#ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
+  if ( l->depth == 0 || l->level == 0 ) return;
 
-  cudaStream_t *streams_gmres = (l->p_PRECISION).streams;
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
+  int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
+  size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
 
-  int nr_threads, threads_per_cublock, num_eig_vect, offset;
-  size_t tot_shared_mem;
+  CUDA_MALLOC( op->D_vectorized_gpu, OPERATOR_TYPE_PRECISION, 4*offset_v*n );
+  CUDA_MALLOC( op->D_transformed_vectorized_gpu, OPERATOR_TYPE_PRECISION, 4*offset_v*n );
+  CUDA_MALLOC( op->clover_vectorized_gpu, OPERATOR_TYPE_PRECISION, offset_v*n );
+  CUDA_MALLOC( op->neighbor_fw_gpu, int, 5*n );
+  CUDA_MALLOC( op->neighbor_bw_gpu, int, 5*n );
+  CUDA_MALLOC( op->coarse_in_gpu, cu_cmplx_PRECISION, l->vector_size );
+  CUDA_MALLOC( op->coarse_out_gpu, cu_cmplx_PRECISION, l->vector_size );
+  CUDA_MALLOC( op->buffer_gpu[0], cu_cmplx_PRECISION, l->vector_size );
+  CUDA_MALLOC( op->buffer_gpu[1], cu_cmplx_PRECISION, l->vector_size );
 
-  offset = l->num_lattice_site_var;
+  // neighbor tables (fixed)
+  cuda_safe_call( cudaMemcpy( op->neighbor_fw_gpu, op->neighbor_table, 5*n*sizeof(int), cudaMemcpyHostToDevice ) );
+  cuda_safe_call( cudaMemcpy( op->neighbor_bw_gpu, op->backward_neighbor_table, 5*n*sizeof(int), cudaMemcpyHostToDevice ) );
 
-  num_eig_vect = offset/2;
-
-  // Add some "padding" such that each CUDA block corresponds to a coarse-site,
-  // but also such that its size is a multiple of g.warp_size
-  if (num_eig_vect%g.warp_size == 0) {
-    threads_per_cublock = num_eig_vect;
-  } else {
-    threads_per_cublock = (num_eig_vect/g.warp_size + 1) * g.warp_size;
+  // communication: same ghost layout as op->c (see coarse_oddeven_setup_PRECISION)
+  cuda_ghost_alloc_PRECISION( 0, &(op->cuda_c), l );
+  for ( int i=0; i<8; i++ ) {
+    op->cuda_c.comm_start[i] = op->c.comm_start[i];
+    op->cuda_c.num_boundary_sites[i] = op->c.num_boundary_sites[i];
+    op->cuda_c.num_even_boundary_sites[i] = op->c.num_even_boundary_sites[i];
+    op->cuda_c.num_odd_boundary_sites[i] = op->c.num_odd_boundary_sites[i];
+  }
+  op->cuda_c.comm = op->c.comm;
+  for ( int mu=0; mu<4; mu++ ) {
+    int bs = 1;
+    for ( int nu=0; nu<4; nu++ )
+      if ( nu != mu ) bs *= l->local_lattice[nu];
+    // as for op->c, the same table in both directions
+    CUDA_MALLOC( op->cuda_c.boundary_table_gpu[2*mu], int, bs );
+    cuda_safe_call( cudaMemcpy( op->cuda_c.boundary_table_gpu[2*mu], op->c.boundary_table[2*mu], bs*sizeof(int),
+                                cudaMemcpyHostToDevice ) );
+    op->cuda_c.boundary_table_gpu[2*mu+1] = op->cuda_c.boundary_table_gpu[2*mu];
   }
 
-  // <end-start> (=length/offset) gives us, based on n1, the nr of sites per OpenMP thread
-  nr_threads = length/offset;
-  // and divided by 2 due to hermiticity of the matrix
-  nr_threads *= num_eig_vect;
-
-  tot_shared_mem = 1;
-  // shared memory associated to clover
-  tot_shared_mem += (offset*offset+offset)/2;
-  // shared memory associated to buffer spinors (two spinors)
-  tot_shared_mem += 2*offset;
-  // and, add shared memory for the lower-triangular off-diagonal part in the two diagonal-blocks
-  //tot_shared_mem += 2*((num_eig_vect*num_eig_vect-num_eig_vect)/2);
-  tot_shared_mem *= sizeof(cu_cmplx_PRECISION);
-
-  // even sites
-  coarse_self_couplings_PRECISION_CUDA_kernel<<<nr_threads/threads_per_cublock, threads_per_cublock, tot_shared_mem, streams_gmres[threading->core]>>>
-                                             (eta, phi, clover, offset);
+  cuda_coarse_oddeven_PRECISION_op_to_gpu( l );
+#endif
 }
 
 
-extern "C" void coarse_diag_ee_PRECISION_CUDA( cuda_vector_PRECISION y, cuda_vector_PRECISION x, 
-                                               operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
+extern "C" void cuda_coarse_oddeven_PRECISION_op_to_gpu( level_struct *l ) {
+#ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
+  if ( op->D_vectorized_gpu == NULL ) return;
 
-  int n1, start, end, offset;
+  int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
+  size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
 
-  n1 = op->num_even_sites;
-  compute_core_start_end_custom(0, n1, &start, &end, l, threading, 1);
+  cuda_safe_call( cudaMemcpy( op->D_vectorized_gpu, op->D_vectorized, 4*offset_v*n*sizeof(OPERATOR_TYPE_PRECISION),
+                              cudaMemcpyHostToDevice ) );
+  cuda_safe_call( cudaMemcpy( op->D_transformed_vectorized_gpu, op->D_transformed_vectorized,
+                              4*offset_v*n*sizeof(OPERATOR_TYPE_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_safe_call( cudaMemcpy( op->clover_vectorized_gpu, op->clover_vectorized, offset_v*n*sizeof(OPERATOR_TYPE_PRECISION),
+                              cudaMemcpyHostToDevice ) );
+#endif
+}
 
-  offset = l->num_lattice_site_var;
 
-  coarse_self_couplings_PRECISION_CUDA( y+start*offset, x+start*offset, op->clover_gpu+start*(offset*offset+offset)/2, (end-start)*offset, l, threading );
+extern "C" void cuda_coarse_oddeven_PRECISION_free( level_struct *l ) {
+#ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
+  if ( op->D_vectorized_gpu == NULL ) return;
+
+  int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
+  size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
+
+  CUDA_FREE( op->D_vectorized_gpu, OPERATOR_TYPE_PRECISION, 4*offset_v*n );
+  CUDA_FREE( op->D_transformed_vectorized_gpu, OPERATOR_TYPE_PRECISION, 4*offset_v*n );
+  CUDA_FREE( op->clover_vectorized_gpu, OPERATOR_TYPE_PRECISION, offset_v*n );
+  CUDA_FREE( op->neighbor_fw_gpu, int, 5*n );
+  CUDA_FREE( op->neighbor_bw_gpu, int, 5*n );
+  CUDA_FREE( op->coarse_in_gpu, cu_cmplx_PRECISION, l->vector_size );
+  CUDA_FREE( op->coarse_out_gpu, cu_cmplx_PRECISION, l->vector_size );
+  CUDA_FREE( op->buffer_gpu[0], cu_cmplx_PRECISION, l->vector_size );
+  CUDA_FREE( op->buffer_gpu[1], cu_cmplx_PRECISION, l->vector_size );
+
+  cuda_ghost_free_PRECISION( &(op->cuda_c), l );
+  for ( int mu=0; mu<4; mu++ ) {
+    int bs = 1;
+    for ( int nu=0; nu<4; nu++ )
+      if ( nu != mu ) bs *= l->local_lattice[nu];
+    CUDA_FREE( op->cuda_c.boundary_table_gpu[2*mu], int, bs );
+    op->cuda_c.boundary_table_gpu[2*mu+1] = NULL;
+  }
+#endif
 }
 
 #endif

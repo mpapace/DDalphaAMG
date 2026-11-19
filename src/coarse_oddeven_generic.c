@@ -452,10 +452,22 @@ void coarse_oddeven_setup_PRECISION( operator_PRECISION_struct *in, int reorder,
     l->p_PRECISION.v_end = op->num_even_sites*l->num_lattice_site_var;
   else
     l->sp_PRECISION.v_end = op->num_even_sites*l->num_lattice_site_var;
+
+#ifdef CUDA_OPT
+  // copy of the operator on the GPU (only coarse levels other than the coarsest, vectorized layout)
+  cuda_coarse_oddeven_PRECISION_alloc( l );
+#endif
 }
 
 void coarse_oddeven_re_setup_PRECISION( operator_PRECISION_struct *in, int reorder, level_struct *l, struct Thread *threading ) {
   coarse_oddeven_setup_PRECISION_set_couplings( in, reorder, l, threading );
+#ifdef CUDA_OPT
+  SYNC_CORES(threading)
+  START_MASTER(threading)
+  cuda_coarse_oddeven_PRECISION_op_to_gpu( l );
+  END_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+#endif
 }
 
 
@@ -464,6 +476,9 @@ void coarse_oddeven_free_PRECISION( level_struct *l ) {
   int mu, nu, nc_size = SQUARE(l->num_lattice_site_var),
       *ll = l->local_lattice, n = l->num_inner_lattice_sites, bs;
   
+#ifdef CUDA_OPT
+  cuda_coarse_oddeven_PRECISION_free( l );
+#endif
   ghost_free_PRECISION( &(l->oe_op_PRECISION.c), l );
   FREE( l->oe_op_PRECISION.D, complex_PRECISION, 4*nc_size*n );
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
