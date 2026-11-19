@@ -209,7 +209,8 @@ extern "C" void cuda_coarse_operator_PRECISION_op_to_gpu( operator_PRECISION_str
 
 extern "C" void cuda_coarse_operator_PRECISION_free( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
-  if ( op->D_vectorized_gpu == NULL ) return;
+  // only the operators allocated by cuda_coarse_operator_PRECISION_alloc
+  if ( l->depth == 0 || l->level == 0 || op->D_vectorized_gpu == NULL ) return;
 
   int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
   size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
@@ -374,6 +375,28 @@ extern "C" void cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( vect
   cuda_safe_call( cudaMemcpy( op->coarse_in_gpu, in, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
   cuda_coarse_apply_schur_complement_PRECISION( op->coarse_out_gpu, op->coarse_in_gpu, op, l );
   cuda_safe_call( cudaMemcpy( out, op->coarse_out_gpu, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+  END_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+}
+
+// eta = D phi on all the inner sites, as apply_coarse_operator_PRECISION (vectorized layout)
+extern "C" void cuda_apply_coarse_operator_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi,
+                                                      operator_PRECISION_struct *op, level_struct *l ) {
+  cuda_coarse_self_couplings_PRECISION( eta, phi, 0, l->num_inner_lattice_sites, op, l );
+  cuda_coarse_pn_hopping_term_PRECISION( eta, phi, op, _FULL_SYSTEM, +1, l );
+}
+
+
+extern "C" void cuda_apply_coarse_operator_PRECISION_vectorwrapper( vector_PRECISION eta, vector_PRECISION phi,
+                                                                    operator_PRECISION_struct *op, level_struct *l,
+                                                                    struct Thread *threading ) {
+  size_t size = (size_t)l->inner_vector_size;
+
+  SYNC_CORES(threading)
+  START_MASTER(threading)
+  cuda_safe_call( cudaMemcpy( op->coarse_in_gpu, phi, size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+  cuda_apply_coarse_operator_PRECISION( op->coarse_out_gpu, op->coarse_in_gpu, op, l );
+  cuda_safe_call( cudaMemcpy( eta, op->coarse_out_gpu, size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
   END_MASTER(threading)
   SYNC_MASTER_TO_ALL(threading)
 }

@@ -27,6 +27,12 @@
 
 #include "sse_coarse_operator.h"
 
+#if defined(CUDA_OPT) && defined(VECTORIZE_COARSE_OPERATOR_PRECISION)
+static void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
+                                                 level_struct *l, struct Thread *threading );
+static void coarse_operator_gpu_test_PRECISION( operator_PRECISION_struct *op, level_struct *l );
+#endif
+
 void coarse_operator_PRECISION_setup_vectorized( complex_PRECISION *operator, level_struct *l, struct Thread *threading ) {
   // the interpolation operator is final here (after Gram-Schmidt): CPU: nothing; GPU: copy to the device
   interpolation_PRECISION_op_to_device( l, threading );
@@ -289,6 +295,20 @@ void coarse_operator_PRECISION_set_couplings( operator_PRECISION_struct *op, lev
         n_per_core, l->num_lattice_site_var/2);
     SYNC_CORES(threading)
   }
+
+#ifdef CUDA_OPT
+  // copy of the operator on the GPU (allocated and tested at the first call)
+  SYNC_CORES(threading)
+  START_LOCKED_MASTER(threading)
+  if ( op->D_vectorized_gpu == NULL ) {
+    cuda_coarse_operator_PRECISION_alloc( op, l );
+    if ( cuda_coarse_operator_on_gpu_PRECISION( op, l ) )
+      coarse_operator_gpu_test_PRECISION( op, l );
+  } else {
+    cuda_coarse_operator_PRECISION_op_to_gpu( op, l );
+  }
+  END_LOCKED_MASTER(threading)
+#endif
 }
 #endif
 
@@ -755,6 +775,14 @@ void coarse_block_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
 void apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
                                       level_struct *l, struct Thread *threading ) {
+#ifdef CUDA_OPT
+  apply_coarse_operator_PRECISION_cpu( eta, phi, op, l, threading );
+}
+
+
+static void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
+                                                 level_struct *l, struct Thread *threading ) {
+#endif
 
   // RE-ENABLE !
   //printf0("WITHIN NON-SCHUR !!, depth=%d \n", l->depth);
@@ -781,6 +809,37 @@ void apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi
   PROF_PRECISION_STOP( _NC, 1, threading );
 //#endif
 }
+
+
+#ifdef CUDA_OPT
+// unit test at setup: coarse operator on the GPU against the CPU code, on a random vector
+static void coarse_operator_gpu_test_PRECISION( operator_PRECISION_struct *op, level_struct *l ) {
+
+  vector_PRECISION x = NULL, y_cpu = NULL, y_gpu = NULL;
+  PRECISION diff, norm, tol = 1e-5;
+
+  MALLOC( x, complex_PRECISION, l->vector_size );
+  MALLOC( y_cpu, complex_PRECISION, l->vector_size );
+  MALLOC( y_gpu, complex_PRECISION, l->vector_size );
+  vector_PRECISION_define( x, 0, 0, l->vector_size, l );
+  vector_PRECISION_define( y_cpu, 0, 0, l->vector_size, l );
+  vector_PRECISION_define( y_gpu, 0, 0, l->vector_size, l );
+  vector_PRECISION_define_random( x, 0, l->inner_vector_size, l );
+
+  apply_coarse_operator_PRECISION_cpu( y_cpu, x, op, l, no_threading );
+  cuda_apply_coarse_operator_PRECISION_vectorwrapper( y_gpu, x, op, l, no_threading );
+
+  norm = global_norm_PRECISION( y_cpu, 0, l->inner_vector_size, l, no_threading );
+  vector_PRECISION_minus( y_gpu, y_gpu, y_cpu, 0, l->inner_vector_size, l );
+  diff = global_norm_PRECISION( y_gpu, 0, l->inner_vector_size, l, no_threading );
+  printf0("depth: %d, unit test of the coarse operator on the GPU: relative difference to the CPU = %e %s\n",
+          l->depth, diff/norm, ( diff/norm < tol ) ? "PASS" : "FAIL" );
+
+  FREE( x, complex_PRECISION, l->vector_size );
+  FREE( y_cpu, complex_PRECISION, l->vector_size );
+  FREE( y_gpu, complex_PRECISION, l->vector_size );
+}
+#endif
 #endif
 
 #endif // SSE
