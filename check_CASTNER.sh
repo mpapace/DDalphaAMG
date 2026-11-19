@@ -35,6 +35,8 @@ echo "exit code: $?   full output: $OUT"
 
 echo "--- unit tests (only in test builds)"
 grep -A2 -E "^\[rank 0\] (interpolate|restrict) test" "$OUT" || echo "(none)"
+echo "--- unit test of the depth-1 Schur complement on the GPU (every build)"
+grep "unit test of the odd-even Schur complement" "$OUT" || echo "(none)"
 echo "--- CUDA errors: $(grep -ci 'cuda error' "$OUT")"
 
 python3 - "$OUT" << 'PYEOF'
