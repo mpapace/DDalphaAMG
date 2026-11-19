@@ -14,6 +14,20 @@
   void cuda_coarse_oddeven_PRECISION_alloc( level_struct *l );
   void cuda_coarse_oddeven_PRECISION_op_to_gpu( level_struct *l );
   void cuda_coarse_oddeven_PRECISION_free( level_struct *l );
+
+  // on GPU vectors of length l->vector_size (one thread, default stream, synchronised on return)
+  void cuda_coarse_self_couplings_PRECISION( cuda_vector_PRECISION y, cuda_vector_PRECISION x,
+                                             int start, int end, operator_PRECISION_struct *op, level_struct *l );
+  void cuda_coarse_pn_hopping_term_PRECISION( cuda_vector_PRECISION out, cuda_vector_PRECISION in,
+                                              operator_PRECISION_struct *op, const int amount, int sign,
+                                              level_struct *l );
+  void cuda_coarse_apply_schur_complement_PRECISION( cuda_vector_PRECISION out, cuda_vector_PRECISION in,
+                                                     operator_PRECISION_struct *op, level_struct *l );
+
+  // on host vectors (called by all threads)
+  void cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( vector_PRECISION out, vector_PRECISION in,
+                                                                   operator_PRECISION_struct *op, level_struct *l,
+                                                                   struct Thread *threading );
 #endif
 
 #endif

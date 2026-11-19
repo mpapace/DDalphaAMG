@@ -23,6 +23,11 @@
 #include "profiling.h"
 #include "proxies/data_layout_proxy_PRECISION.h"
 
+static void coarse_apply_schur_complement_PRECISION_cpu( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading );
+#ifdef CUDA_OPT
+static void coarse_oddeven_gpu_test_PRECISION( level_struct *l );
+#endif
+
 
 #ifdef TM_COARSEST
 void add_tm_shift_PRECISION( const int N, PRECISION *A, int lda ) {
@@ -456,6 +461,8 @@ void coarse_oddeven_setup_PRECISION( operator_PRECISION_struct *in, int reorder,
 #ifdef CUDA_OPT
   // copy of the operator on the GPU (only coarse levels other than the coarsest, vectorized layout)
   cuda_coarse_oddeven_PRECISION_alloc( l );
+  if ( cuda_coarse_oddeven_on_gpu_PRECISION( l ) )
+    coarse_oddeven_gpu_test_PRECISION( l );
 #endif
 }
 
@@ -1313,18 +1320,12 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
 
 void coarse_apply_schur_complement_PRECISION( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
-  // RE-ENABLE !
-  //printf0("WITHIN SCHUR !!, depth=%d \n", l->depth);
+  coarse_apply_schur_complement_PRECISION_cpu( out, in, op, l, threading );
+}
 
-  // this function is supposed to be called from the coarsest-level only
-  //if (l->level != 0) error0("coarse_apply_schur_complement_PRECISION(...) is supposed to be called from the coarsest-level. Is odd-even being applied to FGMRES in intermediate levels?");
 
-  // RE-ENABLE CUDA_OPT !!
+static void coarse_apply_schur_complement_PRECISION_cpu( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
-//#ifdef CUDA_OPT
-//  // TODO : add profiling here (see non-GPU code below)
-//  coarse_apply_schur_complement_PRECISION_CUDA( (cuda_vector_PRECISION)out, (cuda_vector_PRECISION)in, op, l, threading );
-//#else
   // start and end indices for vector functions depending on thread
   int start;
   int end;
@@ -1354,8 +1355,41 @@ void coarse_apply_schur_complement_PRECISION( vector_PRECISION out, vector_PRECI
   coarse_n_hopping_term_PRECISION( out, tmp[1], op, _EVEN_SITES, l, threading );
   PROF_PRECISION_STOP( _NHOPPING, 1, threading );
   PROF_PRECISION_STOP( _NC, 1, threading );
-//#endif
 }
+
+
+#ifdef CUDA_OPT
+// unit test at setup: Schur complement of the odd-even operator on the GPU against the CPU code,
+// on a random vector (even sites, the odd sites of out are not written by either)
+static void coarse_oddeven_gpu_test_PRECISION( level_struct *l ) {
+
+  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
+  int even_size = op->num_even_sites*l->num_lattice_site_var;
+  vector_PRECISION x = NULL, y_cpu = NULL, y_gpu = NULL;
+  PRECISION diff, norm, tol = 1e-5;
+
+  MALLOC( x, complex_PRECISION, l->vector_size );
+  MALLOC( y_cpu, complex_PRECISION, l->vector_size );
+  MALLOC( y_gpu, complex_PRECISION, l->vector_size );
+  vector_PRECISION_define( x, 0, 0, l->vector_size, l );
+  vector_PRECISION_define( y_cpu, 0, 0, l->vector_size, l );
+  vector_PRECISION_define( y_gpu, 0, 0, l->vector_size, l );
+  vector_PRECISION_define_random( x, 0, even_size, l );
+
+  coarse_apply_schur_complement_PRECISION_cpu( y_cpu, x, op, l, no_threading );
+  cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( y_gpu, x, op, l, no_threading );
+
+  norm = global_norm_PRECISION( y_cpu, 0, even_size, l, no_threading );
+  vector_PRECISION_minus( y_gpu, y_gpu, y_cpu, 0, even_size, l );
+  diff = global_norm_PRECISION( y_gpu, 0, even_size, l, no_threading );
+  printf0("depth: %d, unit test of the odd-even Schur complement on the GPU: relative difference to the CPU = %e %s\n",
+          l->depth, diff/norm, ( diff/norm < tol ) ? "PASS" : "FAIL" );
+
+  FREE( x, complex_PRECISION, l->vector_size );
+  FREE( y_cpu, complex_PRECISION, l->vector_size );
+  FREE( y_gpu, complex_PRECISION, l->vector_size );
+}
+#endif
 
 
 void g5D_coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
