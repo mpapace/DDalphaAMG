@@ -229,11 +229,13 @@ extern "C" void cuda_coarse_operator_PRECISION_free( operator_PRECISION_struct *
   CUDA_FREE( op->buffer_gpu[1], cu_cmplx_PRECISION, l->vector_size );
   if ( op->gmres_V_gpu != NULL ) {
     CUDA_FREE( op->gmres_V_gpu, cu_cmplx_PRECISION, (size_t)op->gmres_V_cols*l->vector_size );
+    CUDA_FREE( op->gmres_h_gpu, cu_cmplx_PRECISION, op->gmres_V_cols );
+    op->gmres_V_cols = 0;
+  }
+  if ( op->gmres_b_gpu != NULL ) {
     CUDA_FREE( op->gmres_b_gpu, cu_cmplx_PRECISION, l->vector_size );
     CUDA_FREE( op->gmres_x_gpu, cu_cmplx_PRECISION, l->vector_size );
     CUDA_FREE( op->gmres_r_gpu, cu_cmplx_PRECISION, l->vector_size );
-    CUDA_FREE( op->gmres_h_gpu, cu_cmplx_PRECISION, op->gmres_V_cols );
-    op->gmres_V_cols = 0;
   }
 
   cuda_ghost_free_PRECISION( &(op->cuda_c), l );
@@ -498,7 +500,8 @@ static int cuda_coarse_gmres_PRECISION( gmres_PRECISION_struct *p, operator_PREC
       CUDA_FREE( op->gmres_h_gpu, cu_cmplx_PRECISION, op->gmres_V_cols );
     }
     CUDA_MALLOC( op->gmres_V_gpu, cu_cmplx_PRECISION, (size_t)(m+1)*ld );
-    CUDA_MALLOC( op->gmres_h_gpu, cu_cmplx_PRECISION, m+1 );
+    // (m+1) in brackets: CUDA_MALLOC multiplies the length by the size of the type without brackets
+    CUDA_MALLOC( op->gmres_h_gpu, cu_cmplx_PRECISION, (m+1) );
     op->gmres_V_cols = m+1;
   }
 
