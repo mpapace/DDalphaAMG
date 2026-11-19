@@ -32,6 +32,10 @@
                                                      operator_PRECISION_struct *op, level_struct *l );
   void cuda_apply_coarse_operator_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi,
                                              operator_PRECISION_struct *op, level_struct *l );
+  void cuda_coarse_solve_odd_even_prepare_PRECISION( cuda_vector_PRECISION x, cuda_vector_PRECISION b,
+                                                     operator_PRECISION_struct *op, level_struct *l );
+  void cuda_coarse_solve_odd_even_finish_PRECISION( cuda_vector_PRECISION x, cuda_vector_PRECISION b,
+                                                    operator_PRECISION_struct *op, level_struct *l );
 
   // on host vectors (called by all threads)
   void cuda_coarse_apply_schur_complement_PRECISION_vectorwrapper( vector_PRECISION out, vector_PRECISION in,
