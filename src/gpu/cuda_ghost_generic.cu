@@ -22,8 +22,9 @@ __global__ void _boundary2buffer(cu_cmplx_PRECISION const *phi, cu_cmplx_PRECISI
   buffer[idx] = phi[idx_data];
 }
 
+// add = 1: the buffer is added to the boundary sites (coarse levels, as ghost_wait_PRECISION)
 __global__ void _buffer2boundary(cu_cmplx_PRECISION *phi, cu_cmplx_PRECISION const *buffer,
-                                 int const *table, size_t offset, size_t num_boundary_sites) {
+                                 int const *table, size_t offset, size_t num_boundary_sites, int add) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_boundary_sites * offset) {
     // there is no more data for this index
@@ -32,7 +33,7 @@ __global__ void _buffer2boundary(cu_cmplx_PRECISION *phi, cu_cmplx_PRECISION con
   size_t idx_boundary_site = idx / offset;
   size_t idx_data = idx % offset;
   phi += table[idx_boundary_site] * offset;
-  phi[idx_data] = buffer[idx];
+  phi[idx_data] = add ? cu_cadd_PRECISION(phi[idx_data], buffer[idx]) : buffer[idx];
 }
 
 void cuda_ghost_alloc_PRECISION(int buffer_size, cuda_comm_PRECISION_struct *c, level_struct *l) {
@@ -314,9 +315,10 @@ void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, const int mu, const in
       constexpr size_t blockSize = 128;
       const size_t gridSize = minGridSizeForN(num_boundary_sites * offset, blockSize);
 #ifdef GPU2GPU_COMMS_VIA_CPUS
-      _buffer2boundary<<<gridSize, blockSize>>>(phi, c->buffer_gpu[mu_dir], table, offset, num_boundary_sites);
+      _buffer2boundary<<<gridSize, blockSize>>>(phi, c->buffer_gpu[mu_dir], table, offset, num_boundary_sites,
+                                                l->depth > 0);
 #else
-      _buffer2boundary<<<gridSize, blockSize>>>(phi, buffer, table, offset, num_boundary_sites);
+      _buffer2boundary<<<gridSize, blockSize>>>(phi, buffer, table, offset, num_boundary_sites, l->depth > 0);
 #endif
       cuda_safe_call(cudaDeviceSynchronize());
     } else if (dir == -1) {
