@@ -430,44 +430,6 @@ extern "C" void cuda_coarse_solve_odd_even_finish_PRECISION( cuda_vector_PRECISI
 }
 
 
-// the two steps above on host vectors (called by all threads); only the parts of x and b that
-// are read or written are copied
-extern "C" void cuda_coarse_solve_odd_even_prepare_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
-                                                                            operator_PRECISION_struct *op,
-                                                                            level_struct *l, struct Thread *threading ) {
-  size_t even_size = (size_t)op->num_even_sites*l->num_lattice_site_var,
-         odd_size = (size_t)op->num_odd_sites*l->num_lattice_site_var;
-  cuda_vector_PRECISION x_gpu = op->coarse_in_gpu, b_gpu = op->coarse_out_gpu;
-
-  SYNC_CORES(threading)
-  START_MASTER(threading)
-  cuda_safe_call( cudaMemcpy( b_gpu, b, (even_size+odd_size)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_coarse_solve_odd_even_prepare_PRECISION( x_gpu, b_gpu, op, l );
-  cuda_safe_call( cudaMemcpy( x+even_size, x_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-  cuda_safe_call( cudaMemcpy( b, b_gpu, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-  END_MASTER(threading)
-  SYNC_MASTER_TO_ALL(threading)
-}
-
-
-extern "C" void cuda_coarse_solve_odd_even_finish_PRECISION_vectorwrapper( vector_PRECISION x, vector_PRECISION b,
-                                                                           operator_PRECISION_struct *op,
-                                                                           level_struct *l, struct Thread *threading ) {
-  size_t even_size = (size_t)op->num_even_sites*l->num_lattice_site_var,
-         odd_size = (size_t)op->num_odd_sites*l->num_lattice_site_var;
-  cuda_vector_PRECISION x_gpu = op->coarse_in_gpu, b_gpu = op->coarse_out_gpu;
-
-  SYNC_CORES(threading)
-  START_MASTER(threading)
-  cuda_safe_call( cudaMemcpy( x_gpu, x, even_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_safe_call( cudaMemcpy( b_gpu+even_size, b+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_coarse_solve_odd_even_finish_PRECISION( x_gpu, b_gpu, op, l );
-  cuda_safe_call( cudaMemcpy( b+even_size, b_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-  cuda_safe_call( cudaMemcpy( x+even_size, x_gpu+even_size, odd_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-  END_MASTER(threading)
-  SYNC_MASTER_TO_ALL(threading)
-}
-
 #define CUBLAS_CHECK_COARSE(call)                                                 \
   do {                                                                            \
     cublasStatus_t st_ = (call);                                                  \
