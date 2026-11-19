@@ -23,7 +23,6 @@
 #include "profiling.h"
 #include "proxies/data_layout_proxy_PRECISION.h"
 
-static void coarse_apply_schur_complement_PRECISION_cpu( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading );
 #ifdef CUDA_OPT
 static void coarse_oddeven_gpu_test_PRECISION( level_struct *l );
 #endif
@@ -1342,7 +1341,7 @@ void coarse_apply_schur_complement_PRECISION( vector_PRECISION out, vector_PRECI
 }
 
 
-static void coarse_apply_schur_complement_PRECISION_cpu( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
+void coarse_apply_schur_complement_PRECISION_cpu( vector_PRECISION out, vector_PRECISION in, operator_PRECISION_struct *op, level_struct *l, struct Thread *threading ) {
 
   // start and end indices for vector functions depending on thread
   int start;

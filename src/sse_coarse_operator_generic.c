@@ -29,8 +29,6 @@
 #include "sse_coarse_operator.h"
 
 #if defined(CUDA_OPT) && defined(VECTORIZE_COARSE_OPERATOR_PRECISION)
-static void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
-                                                 level_struct *l, struct Thread *threading );
 static void coarse_operator_gpu_test_PRECISION( operator_PRECISION_struct *op, level_struct *l );
 #endif
 
@@ -789,8 +787,8 @@ void apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi
 }
 
 
-static void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
-                                                 level_struct *l, struct Thread *threading ) {
+void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
+                                          level_struct *l, struct Thread *threading ) {
 #endif
 
   // RE-ENABLE !

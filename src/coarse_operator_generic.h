@@ -44,6 +44,11 @@
   void coarse_gamma5_PRECISION( vector_PRECISION eta, vector_PRECISION phi, int start, int end, level_struct *l );
   void apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi,
                                         operator_PRECISION_struct *op, level_struct *l, struct Thread *threading );
+#if defined( CUDA_OPT ) && defined( VECTORIZE_COARSE_OPERATOR_PRECISION )
+  // CPU code of apply_coarse_operator_PRECISION (also when the operator is on the GPU)
+  void apply_coarse_operator_PRECISION_cpu( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
+                                            level_struct *l, struct Thread *threading );
+#endif
   void g5D_apply_coarse_operator_PRECISION( vector_PRECISION eta, vector_PRECISION phi, operator_PRECISION_struct *op,
                                             level_struct *l, struct Thread *threading );
   void apply_coarse_operator_dagger_PRECISION( vector_PRECISION eta, vector_PRECISION phi,
