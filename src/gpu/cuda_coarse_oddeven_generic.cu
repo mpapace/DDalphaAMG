@@ -270,7 +270,8 @@ extern "C" void cuda_coarse_self_couplings_PRECISION( cuda_vector_PRECISION y, c
 
 // as coarse_pn_hopping_term_PRECISION_vectorized: sign = +1 is coarse_hopping_term_PRECISION
 // (out -= hopping term), sign = -1 is coarse_n_hopping_term_PRECISION (out += hopping term);
-// amount = _EVEN_SITES or _ODD_SITES are the sites of out that are computed
+// amount = _EVEN_SITES or _ODD_SITES are the sites of out that are computed (odd-even operator),
+// _FULL_SYSTEM all the sites (coarse_hopping_term_PRECISION( ..., _FULL_SYSTEM, ... ), any operator)
 extern "C" void cuda_coarse_pn_hopping_term_PRECISION( cuda_vector_PRECISION out, cuda_vector_PRECISION in,
                                                        operator_PRECISION_struct *op, const int amount, int sign,
                                                        level_struct *l ) {
@@ -298,8 +299,10 @@ extern "C" void cuda_coarse_pn_hopping_term_PRECISION( cuda_vector_PRECISION out
     // backward couplings into the forward ghost sites of out, from the sites of the other parity
     if ( amount == _EVEN_SITES ) {
       start = op->num_even_sites; num_sites = op->num_odd_sites;
-    } else {
+    } else if ( amount == _ODD_SITES ) {
       start = 0; num_sites = op->num_even_sites;
+    } else {
+      start = 0; num_sites = num_inner_sites;
     }
     if ( num_sites > 0 ) {
       cuda_coarse_hopping_boundary_kernel_PRECISION<<< cuda_coarse_oddeven_grid_PRECISION( (size_t)num_sites*4*n ),
@@ -319,8 +322,10 @@ extern "C" void cuda_coarse_pn_hopping_term_PRECISION( cuda_vector_PRECISION out
 
   if ( amount == _EVEN_SITES ) {
     start = 0; num_sites = op->num_even_sites;
-  } else {
+  } else if ( amount == _ODD_SITES ) {
     start = op->num_even_sites; num_sites = op->num_odd_sites;
+  } else {
+    start = 0; num_sites = num_inner_sites;
   }
   if ( num_sites > 0 ) {
     cuda_coarse_hopping_kernel_PRECISION<<< cuda_coarse_oddeven_grid_PRECISION( (size_t)num_sites*n ),
