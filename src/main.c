@@ -20,6 +20,7 @@
  */
  
 #include "main.h"
+#include "piece_benchmark.h"
 
 #include "profiling.h"
 #include "proxies/dirac_proxy.h"
@@ -131,6 +132,10 @@ int main( int argc, char **argv ) {
     g.on_solve=1;
     solve_driver( &l, &threading );
     endProfilingRange(rangeHandle);
+#if defined( CUDA_OPT ) && defined( CUDA_PIECE_BENCHMARK )
+    // pieces ported to the GPU against their CPU code (overwrites the state of the solver)
+    piece_benchmark( &l, &threading );
+#endif
   }
 
   finalize_common_thread_data(commonthreaddata);
