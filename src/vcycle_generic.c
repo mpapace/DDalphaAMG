@@ -106,6 +106,7 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
           // depth 0: odd-even preparation, GMRES and reconstruction on the GPU
           START_MASTER(threading);
           PROF_PRECISION_START( _SM_OE );
+          g.cuda_half_smoother = 1; // half-precision operators allowed (-DCUDA_HALF_OPERATORS)
           END_MASTER(threading);
           START_LOCKED_MASTER(threading)
           l->sp_PRECISION.initial_guess_zero = _NO_RES;
@@ -120,6 +121,7 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
           cuda_smoother_oe_gmres_PRECISION( phi, &(l->sp_PRECISION), l, threading );
 #endif
           START_MASTER(threading);
+          g.cuda_half_smoother = 0;
           PROF_PRECISION_STOP( _SM_OE, 1 );
           END_MASTER(threading);
         } else {
@@ -152,7 +154,17 @@ void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRE
 
 #if defined(RICHARDSON_SMOOTHER)
             // only Richardson enabled as GPU odd-even finest-level smoother at the moment
+#ifdef CUDA_OPT
+            START_MASTER(threading)
+            g.cuda_half_smoother = 1; // half-precision operators allowed (-DCUDA_HALF_OPERATORS)
+            END_MASTER(threading)
+#endif
             solve_oddeven_PRECISION( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
+#ifdef CUDA_OPT
+            START_MASTER(threading)
+            g.cuda_half_smoother = 0;
+            END_MASTER(threading)
+#endif
 #else
             solve_oddeven_PRECISION_cpu( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
 #endif

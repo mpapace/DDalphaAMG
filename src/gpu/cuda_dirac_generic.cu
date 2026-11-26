@@ -15,6 +15,7 @@ extern "C"{
 #include "cuda_dirac_kernels_componentwise_PRECISION.h"
 #include "cuda_complex_cxx.h"
 #include "cuda_ghost_PRECISION.h"
+#include "cuda_half_ops_PRECISION.h"
 #include "cuda_componentwise.h"
 #ifdef CUDA_OPT
 
@@ -318,6 +319,8 @@ void cuda_d_plus_clover_PRECISION(
 
   constexpr size_t blockSize = diracCommonBlockSize;
   const size_t gridSize = minGridSizeForN(l->num_inner_lattice_sites, blockSize);
+  // links in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
+  const int half_ops = cuda_half_ops_PRECISION(op, l);
 
   const auto pbs = projection_buffer_size(l->num_lattice_site_var, l->num_lattice_sites);
   auto shift = to_cuda_cmplx_PRECISION(op->shift);
@@ -338,8 +341,17 @@ void cuda_d_plus_clover_PRECISION(
   args.prp[0] = op->prpT_gpu; args.prp[1] = op->prpZ_gpu; args.prp[2] = op->prpY_gpu; args.prp[3] = op->prpX_gpu;
   args.D[0] = op->Ds_componentwise_gpu[T]; args.D[1] = op->Ds_componentwise_gpu[Z];
   args.D[2] = op->Ds_componentwise_gpu[Y]; args.D[3] = op->Ds_componentwise_gpu[X];
-  cuda_hopping_project_componentwise_PRECISION<<<gridSize, blockSize>>>( args, phi, op->neighbor_table_gpu,
-                                                                         0, l->num_inner_lattice_sites );
+  for ( int mu=0; mu<4; mu++ ) {
+    args.Dh[mu] = half_ops ? ((__half2 const*) op->Ds_half_gpu[mu]) : NULL;
+    args.Dh_scale[mu] = op->Ds_half_scale[mu];
+  }
+  if ( half_ops ) {
+    cuda_hopping_project_componentwise_half_PRECISION<<<gridSize, blockSize>>>( args, phi, op->neighbor_table_gpu,
+                                                                           0, l->num_inner_lattice_sites );
+  } else {
+    cuda_hopping_project_componentwise_PRECISION<<<gridSize, blockSize>>>( args, phi, op->neighbor_table_gpu,
+                                                                           0, l->num_inner_lattice_sites );
+  }
   cuda_safe_call(cudaDeviceSynchronize());
 
   cuda_ghost_sendrecv_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), _FULL_SYSTEM, l);
@@ -361,8 +373,13 @@ void cuda_d_plus_clover_PRECISION(
   cuda_ghost_wait_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), _FULL_SYSTEM, l);
   cuda_safe_call(cudaDeviceSynchronize());
 
-  cuda_hopping_gather_componentwise_PRECISION<<<gridSize, blockSize>>>( eta, args, op->neighbor_table_gpu,
-                                                                        0, l->num_inner_lattice_sites );
+  if ( half_ops ) {
+    cuda_hopping_gather_componentwise_half_PRECISION<<<gridSize, blockSize>>>( eta, args, op->neighbor_table_gpu,
+                                                                          0, l->num_inner_lattice_sites );
+  } else {
+    cuda_hopping_gather_componentwise_PRECISION<<<gridSize, blockSize>>>( eta, args, op->neighbor_table_gpu,
+                                                                          0, l->num_inner_lattice_sites );
+  }
   cuda_safe_call(cudaDeviceSynchronize());
 
   PROF_PRECISION_STOP_UNTHREADED( _NC, 1 );
@@ -645,6 +662,7 @@ extern "C" void cuda_operator_PRECISION_upload_D_clover( operator_PRECISION_stru
   }
   cuda_safe_call( cudaDeviceSynchronize() );
   cuda_safe_call( cudaGetLastError() );
+  cuda_half_ops_PRECISION_invalidate( op );
 }
 
 #endif

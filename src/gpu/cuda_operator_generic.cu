@@ -1,6 +1,7 @@
 #include "alloc_control.h"
 #include "miscellaneous.h"
 #include "cuda_ghost_PRECISION.h"
+#include "cuda_half_ops_PRECISION.h"
 
 extern "C" {
 
@@ -13,6 +14,7 @@ void cuda_operator_PRECISION_init(operator_PRECISION_struct *op) {
   for ( int mu=0; mu<4; mu++ ) {
     op->Ds_componentwise_gpu[mu] = NULL;
   }
+  cuda_half_ops_PRECISION_init(op);
   op->x_gpu = NULL;
   op->x_componentwise_gpu = NULL;
   op->w_gpu = NULL;
@@ -119,6 +121,7 @@ void cuda_operator_PRECISION_free(operator_PRECISION_struct *op, const int type,
   for ( int mu=0; mu<4; mu++ ) {
     CUDA_FREE(op->Ds_componentwise_gpu[mu], cu_cmplx_PRECISION, 9 * l->num_inner_lattice_sites);
   };
+  cuda_half_ops_PRECISION_free(op, l);
   CUDA_FREE(op->x_gpu, cu_cmplx_PRECISION, l->inner_vector_size);
   CUDA_FREE(op->x_componentwise_gpu, cu_cmplx_PRECISION, l->inner_vector_size);
   CUDA_FREE(op->w_gpu, cu_cmplx_PRECISION, l->inner_vector_size);

@@ -9,6 +9,7 @@
 
 #include "cuda_vectors_PRECISION.h"
 #include "global_enums.h"
+#include <cuda_fp16.h>
 
 // Better to have this known in advance, so we can predetermine shared
 // memory requirements.
@@ -51,6 +52,8 @@ typedef struct {
   cu_cmplx_PRECISION* prn[4];      // (1 - gamma_mu) phi, at the site
   cu_cmplx_PRECISION* prp[4];      // U_mu^H (1 + gamma_mu) phi, at the +mu neighbor
   cu_cmplx_PRECISION const* D[4];  // links, componentwise with stride num_sites, offset to the first site
+  __half2 const* Dh[4];            // the same links in half precision (only for the _half_ kernels)
+  float Dh_scale[4];               // their scales (see cuda_half.h)
 } cuda_hopping_args_PRECISION;
 
 /**
@@ -73,5 +76,15 @@ __global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* 
                                                             cuda_hopping_args_PRECISION args,
                                                             int const* neighbors, size_t start,
                                                             size_t num_sites);
+
+// Same two kernels with the links read from args.Dh (half precision, one scale per direction).
+__global__ void cuda_hopping_project_componentwise_half_PRECISION(cuda_hopping_args_PRECISION args,
+                                                                  cu_cmplx_PRECISION const* phi,
+                                                                  int const* neighbors, size_t start,
+                                                                  size_t num_sites);
+__global__ void cuda_hopping_gather_componentwise_half_PRECISION(cu_cmplx_PRECISION* eta,
+                                                                 cuda_hopping_args_PRECISION args,
+                                                                 int const* neighbors, size_t start,
+                                                                 size_t num_sites);
 
 #endif  // CUDA_DIRAC_KERNELS_COMPONENTWISE_PRECISION_H

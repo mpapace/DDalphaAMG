@@ -112,6 +112,10 @@ int wilson_driver( vector_double solution, vector_double source, level_struct *l
 }
 
 
+#if defined(CUDA_OPT) && defined(CUDA_HALF_TEST)
+void cuda_half_ops_float_test( level_struct *l ); // gpu/cuda_half_ops_generic.cu
+#endif
+
 void solve( vector_double solution, vector_double source, level_struct *l, struct Thread *threading ) {
   
   vector_double rhs = g.mixed_precision==2?g.p_MP.double_section.b:g.p.b;
@@ -123,7 +127,26 @@ void solve( vector_double solution, vector_double source, level_struct *l, struc
     scan_var( &(g.vt), l );
     END_LOCKED_MASTER(threading)
   } else {
+#ifdef CUDA_OPT
+    // the fine-level operators may be applied in half precision during the solve only
+    // (and there only in the depth-0 smoother, see vcycle)
+    SYNC_MASTER_TO_ALL(threading)
+    START_MASTER(threading)
+    g.cuda_half_solve = 1;
+#ifdef CUDA_HALF_TEST
+    cuda_half_ops_float_test( l );
+#endif
+    END_MASTER(threading)
+    SYNC_MASTER_TO_ALL(threading)
+#endif
     wilson_driver( solution, source, l, threading );
+#ifdef CUDA_OPT
+    SYNC_MASTER_TO_ALL(threading)
+    START_MASTER(threading)
+    g.cuda_half_solve = 0;
+    END_MASTER(threading)
+    SYNC_MASTER_TO_ALL(threading)
+#endif
   }
 }
 

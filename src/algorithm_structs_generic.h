@@ -36,6 +36,13 @@ typedef struct
      *  Indices are T, Z, Y and X.
      */
     cu_cmplx_PRECISION * Ds_componentwise_gpu[4];
+    /** Half-precision copies (__half2, one scale per array) of Ds_componentwise_gpu, used in the
+     *  solve phase with -DCUDA_HALF_OPERATORS (see cuda_half_ops_generic.h).
+     *  void* because this header is also compiled as C. */
+    void *Ds_half_gpu[4];
+    float Ds_half_scale[4];
+    /** 1 if the half-precision copies match the current float arrays. */
+    int half_valid;
 
     // Local vectors to apply the operator w = w + Dx on the GPU.
     cuda_vector_PRECISION

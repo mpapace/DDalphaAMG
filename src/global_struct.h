@@ -57,6 +57,11 @@ typedef struct global_struct
     int *CUDA_threads_per_lattice_site_type1;
     int *CUDA_threads_per_CUDA_block_type2;
     int *CUDA_threads_per_lattice_site_type2;
+
+    // with -DCUDA_HALF_OPERATORS the fine-level operators are applied from their half-precision
+    // copies only inside the depth-0 smoother (cuda_half_smoother, set in vcycle) during the
+    // solve phase (cuda_half_solve, set in solve()), so the setup is unchanged
+    int cuda_half_solve, cuda_half_smoother;
 #endif
 
     // index functions for external usage

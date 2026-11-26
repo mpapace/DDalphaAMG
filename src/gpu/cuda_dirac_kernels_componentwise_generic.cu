@@ -4,6 +4,7 @@
 #include "cuda_complex_operators_PRECISION.h"
 #include "cuda_componentwise.h"
 #include "cuda_dirac_kernels_componentwise_PRECISION.h"
+#include "cuda_half.h"
 #include "global_enums.h"
 
 // The clifford header uses a C compiler extension version of I that is not compatible with CUDA.
@@ -224,6 +225,24 @@ __device__ inline void hopping_store6_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_
   }
 }
 
+// the 9 entries of U_mu at site idx, from the float (HALF = false) or half-precision links;
+// pointers passed by value (taking the address of the kernel parameter struct would copy it to
+// local memory)
+template <bool HALF>
+__device__ inline void hopping_load_links_PRECISION(cu_cmplx_PRECISION* U, cu_cmplx_PRECISION const* D,
+                                                    __half2 const* Dh, float Dh_scale, size_t idx,
+                                                    size_t num_sites) {
+  if constexpr (HALF) {
+    auto caD = make_op_access<cu_cmplx_PRECISION>(Dh + idx, num_sites, Dh_scale);
+#pragma unroll
+    for (int k = 0; k < 9; k++) U[k] = caD[k];
+  } else {
+    auto caD = ComponentAccess(D + idx, num_sites);
+#pragma unroll
+    for (int k = 0; k < 9; k++) U[k] = caD[k];
+  }
+}
+
 // projection side for one direction (DIR = T, Z, Y or X, mu its index)
 #define HOPPING_PROJECT_DIR_PRECISION( DIR, mu ) do {                                            \
     cu_cmplx_PRECISION pm[6], pp[6], r[6], U[9];                                                \
@@ -235,9 +254,7 @@ __device__ inline void hopping_store6_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_
       pp[3 + c] = x[3 + c] + GAMMA_##DIR##_SPIN1_VAL * x[3 * GAMMA_##DIR##_SPIN1_CO + c];         \
     }                                                                                            \
     hopping_store6_PRECISION(args.prn[mu] + 6 * (start + idx), pm);                              \
-    auto caD = ComponentAccess(args.D[mu] + idx, num_sites);                                     \
-    _Pragma("unroll")                                                                            \
-    for (int k = 0; k < 9; k++) U[k] = caD[k];                                                   \
+    hopping_load_links_PRECISION<HALF>(U, args.D[mu], args.Dh[mu], args.Dh_scale[mu], idx, num_sites);\
     /* r = U^H pp, for both spin halves */                                                       \
     _Pragma("unroll")                                                                            \
     for (int h = 0; h < 2; h++) {                                                                \
@@ -251,7 +268,8 @@ __device__ inline void hopping_store6_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_
     hopping_store6_PRECISION(args.prp[mu] + 6 * (size_t) neighbors[4 * idx + mu], r);           \
   } while (0)
 
-__global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_PRECISION args,
+template <bool HALF>
+__device__ __forceinline__ void cuda_hopping_project_componentwise_body_PRECISION(cuda_hopping_args_PRECISION args,
                                                              cu_cmplx_PRECISION const* phi,
                                                              int const* neighbors, size_t start,
                                                              size_t num_sites) {
@@ -276,9 +294,7 @@ __global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_P
     cu_cmplx_PRECISION g[6], u[6], U[9];                                                        \
     /* forward hop: u = U_mu (1 - gamma_mu) phi(x + mu), lifted as in pbp_su3 */                 \
     hopping_load6_PRECISION(g, args.prn[mu] + 6 * (size_t) neighbors[4 * idx + mu]);            \
-    auto caD = ComponentAccess(args.D[mu] + idx, num_sites);                                     \
-    _Pragma("unroll")                                                                            \
-    for (int k = 0; k < 9; k++) U[k] = caD[k];                                                   \
+    hopping_load_links_PRECISION<HALF>(U, args.D[mu], args.Dh[mu], args.Dh_scale[mu], idx, num_sites);\
     _Pragma("unroll")                                                                            \
     for (int h = 0; h < 2; h++) {                                                                \
       _Pragma("unroll")                                                                          \
@@ -306,7 +322,8 @@ __global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_P
     }                                                                                            \
   } while (0)
 
-__global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
+template <bool HALF>
+__device__ __forceinline__ void cuda_hopping_gather_componentwise_body_PRECISION(cu_cmplx_PRECISION* eta,
                                                             cuda_hopping_args_PRECISION args,
                                                             int const* neighbors, size_t start,
                                                             size_t num_sites) {
@@ -327,4 +344,30 @@ __global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* 
 
 #pragma unroll
   for (int i = 0; i < 12; i++) caEta[i] = e[i];
+}
+
+__global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_PRECISION args,
+                                                             cu_cmplx_PRECISION const* phi,
+                                                             int const* neighbors, size_t start,
+                                                             size_t num_sites) {
+  cuda_hopping_project_componentwise_body_PRECISION<false>(args, phi, neighbors, start, num_sites);
+}
+__global__ void cuda_hopping_project_componentwise_half_PRECISION(cuda_hopping_args_PRECISION args,
+                                                             cu_cmplx_PRECISION const* phi,
+                                                             int const* neighbors, size_t start,
+                                                             size_t num_sites) {
+  cuda_hopping_project_componentwise_body_PRECISION<true>(args, phi, neighbors, start, num_sites);
+}
+
+__global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
+                                                            cuda_hopping_args_PRECISION args,
+                                                            int const* neighbors, size_t start,
+                                                            size_t num_sites) {
+  cuda_hopping_gather_componentwise_body_PRECISION<false>(eta, args, neighbors, start, num_sites);
+}
+__global__ void cuda_hopping_gather_componentwise_half_PRECISION(cu_cmplx_PRECISION* eta,
+                                                            cuda_hopping_args_PRECISION args,
+                                                            int const* neighbors, size_t start,
+                                                            size_t num_sites) {
+  cuda_hopping_gather_componentwise_body_PRECISION<true>(eta, args, neighbors, start, num_sites);
 }

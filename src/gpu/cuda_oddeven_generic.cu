@@ -14,6 +14,7 @@ extern "C"{
 #include "cuda_dirac_kernels_componentwise_PRECISION.h"
 #include "cuda_complex_cxx.h"
 #include "cuda_ghost_PRECISION.h"
+#include "cuda_half_ops_PRECISION.h"
 
 #ifdef CUDA_OPT
 
@@ -4132,6 +4133,8 @@ void cuda_hopping_term_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISI
   int num_oe_sites = end-start;
   constexpr size_t blockSize = diracCommonBlockSize;
   uint gridSize = minGridSizeForN( num_oe_sites, blockSize );
+  // links in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
+  const int half_ops = cuda_half_ops_PRECISION(op, l);
 
   // fused hopping term: one projection kernel over the source parity, ghost exchange of the
   // prn/prp buffers, one gather kernel over the target parity
@@ -4140,8 +4143,17 @@ void cuda_hopping_term_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISI
   args.prp[0] = op->prpT_gpu; args.prp[1] = op->prpZ_gpu; args.prp[2] = op->prpY_gpu; args.prp[3] = op->prpX_gpu;
   args.D[0] = op->Ds_componentwise_gpu[T] + 9*start; args.D[1] = op->Ds_componentwise_gpu[Z] + 9*start;
   args.D[2] = op->Ds_componentwise_gpu[Y] + 9*start; args.D[3] = op->Ds_componentwise_gpu[X] + 9*start;
-  cuda_hopping_project_componentwise_PRECISION<<<gridSize, blockSize>>>( args, phi+12*start,
-                                                  op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  for ( int mu=0; mu<4; mu++ ) {
+    args.Dh[mu] = half_ops ? ((__half2 const*) op->Ds_half_gpu[mu]) + 9*start : NULL;
+    args.Dh_scale[mu] = op->Ds_half_scale[mu];
+  }
+  if ( half_ops ) {
+    cuda_hopping_project_componentwise_half_PRECISION<<<gridSize, blockSize>>>( args, phi+12*start,
+                                                    op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  } else {
+    cuda_hopping_project_componentwise_PRECISION<<<gridSize, blockSize>>>( args, phi+12*start,
+                                                    op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  }
   cuda_safe_call(cudaDeviceSynchronize());
 
   cuda_ghost_sendrecv_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), minus_dir_param, l);
@@ -4172,8 +4184,17 @@ void cuda_hopping_term_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISI
   gridSize = minGridSizeForN( num_oe_sites, blockSize );
   args.D[0] = op->Ds_componentwise_gpu[T] + 9*start; args.D[1] = op->Ds_componentwise_gpu[Z] + 9*start;
   args.D[2] = op->Ds_componentwise_gpu[Y] + 9*start; args.D[3] = op->Ds_componentwise_gpu[X] + 9*start;
-  cuda_hopping_gather_componentwise_PRECISION<<<gridSize, blockSize>>>( eta+12*start, args,
-                                                 op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  for ( int mu=0; mu<4; mu++ ) {
+    args.Dh[mu] = half_ops ? ((__half2 const*) op->Ds_half_gpu[mu]) + 9*start : NULL;
+    args.Dh_scale[mu] = op->Ds_half_scale[mu];
+  }
+  if ( half_ops ) {
+    cuda_hopping_gather_componentwise_half_PRECISION<<<gridSize, blockSize>>>( eta+12*start, args,
+                                                   op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  } else {
+    cuda_hopping_gather_componentwise_PRECISION<<<gridSize, blockSize>>>( eta+12*start, args,
+                                                   op->neighbor_table_gpu+4*start, start, num_oe_sites );
+  }
   cuda_safe_call(cudaDeviceSynchronize());
 
   endProfilingRange(profilingRangeOperator);
@@ -4303,6 +4324,7 @@ extern "C" void cuda_oddeven_setup_PRECISION_setup( operator_double_struct *in, 
                                               op->clover_gpu+css*op->num_even_sites, css, op->num_odd_sites );
 
   cuda_safe_call(cudaDeviceSynchronize());
+  cuda_half_ops_PRECISION_invalidate(op);
 }
 
 extern "C" void cuda_oddeven_setup_PRECISION_free( level_struct *l ) {
