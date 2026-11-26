@@ -30,19 +30,47 @@ __host__ __device__ constexpr cu_cmplx_PRECISION operator ""_cu_i_PRECISION(long
   return {0, (PRECISION)imag};
 }
 
-__host__ __device__ cu_cmplx_PRECISION operator*(cu_cmplx_PRECISION const& lhs, int const& rhs);
-__host__ __device__ cu_cmplx_PRECISION operator*(int const& lhs, cu_cmplx_PRECISION const& rhs);
-__host__ __device__ cu_cmplx_PRECISION operator*(cu_cmplx_PRECISION const& lhs,
-                                                 cu_cmplx_PRECISION const& rhs);
+// Defined inline here (not in a .cu file): with separate compilation (-rdc) out-of-line
+// operators cannot be inlined into the kernels of other files, so every complex product or sum
+// became a function call with arguments passed by reference, forcing the operands of the kernels
+// into local memory.
+__host__ __device__ inline cu_cmplx_PRECISION operator*(cu_cmplx_PRECISION const& lhs, int const& rhs) {
+  return cu_cmul_PRECISION(lhs, make_cu_cmplx_PRECISION(rhs, 0));
+}
 
-__host__ __device__ cu_cmplx_PRECISION operator-(cu_cmplx_PRECISION const& lhs,
-                                                 cu_cmplx_PRECISION const& rhs);
-__host__ __device__ cu_cmplx_PRECISION operator+(cu_cmplx_PRECISION const& lhs,
-                                                 cu_cmplx_PRECISION const& rhs);
-__host__ __device__ cu_cmplx_PRECISION & operator+=(cu_cmplx_PRECISION & lhs,
-                                                  cu_cmplx_PRECISION const& rhs);
-__host__ __device__ cu_cmplx_PRECISION & operator-=(cu_cmplx_PRECISION & lhs,
-                                                  cu_cmplx_PRECISION const& rhs);
-__host__ __device__ cu_cmplx_PRECISION operator-(cu_cmplx_PRECISION const& value);
+__host__ __device__ inline cu_cmplx_PRECISION operator*(int const& lhs, cu_cmplx_PRECISION const& rhs) {
+  return cu_cmul_PRECISION(make_cu_cmplx_PRECISION(lhs, 0), rhs);
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION operator*(cu_cmplx_PRECISION const& lhs,
+                                                 cu_cmplx_PRECISION const& rhs) {
+  return cu_cmul_PRECISION(lhs, rhs);
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION operator-(cu_cmplx_PRECISION const& lhs,
+                                                 cu_cmplx_PRECISION const& rhs) {
+  return cu_csub_PRECISION(lhs, rhs);
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION operator+(cu_cmplx_PRECISION const& lhs,
+                                                 cu_cmplx_PRECISION const& rhs) {
+  return cu_cadd_PRECISION(lhs, rhs);
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION & operator+=(cu_cmplx_PRECISION & lhs,
+                                                    cu_cmplx_PRECISION const& rhs) {
+  lhs = cu_cadd_PRECISION(lhs, rhs);
+  return lhs;
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION & operator-=(cu_cmplx_PRECISION & lhs,
+                                                    cu_cmplx_PRECISION const& rhs) {
+  lhs = cu_csub_PRECISION(lhs, rhs);
+  return lhs;
+}
+
+__host__ __device__ inline cu_cmplx_PRECISION operator-(cu_cmplx_PRECISION const& value) {
+  return {-value.x, -value.y};
+}
 
 #endif  // CUDA_COMPLEX_OPERATORS_PRECISION_H
