@@ -240,52 +240,6 @@ cuda_block_d_plus_clover_PRECISION(				cuda_vector_PRECISION eta, cuda_vector_PR
 
 /** \brief Calculates the self-coupling term eta = D_sc phi.
  * 
- * 
- *  \param[out]   eta           eta in eta = D_sc phi.
- *  \param[in]    phi           psi in eta = D_sc phi.
- *  \param[in]    clover        D_sc in eta = D_sc phi.
- *  \param[in]    num_sites     Number of lattice sites.
- *  \param[in]    l             The level_struct being passed around everywhere.
- */
-extern "C" void _cuda_clover_componentwise_PRECISION(cuda_vector_PRECISION eta,
-                                                     cuda_vector_PRECISION phi,
-                                                     cuda_config_PRECISION clover, int num_sites,
-                                                     level_struct *l) {
-  constexpr size_t blockSize = 128;
-
-  PROF_PRECISION_START_UNTHREADED( _SC );
-  const size_t gridSize = minGridSizeForN(num_sites, blockSize);
-  cuda_site_clover_componentwise_PRECISION<<< gridSize, blockSize>>>(eta, phi, clover, num_sites);
-  cuda_safe_call(cudaDeviceSynchronize());
-  PROF_PRECISION_STOP_UNTHREADED( _SC, 1);
-}
-
-extern "C" void cuda_diag_ee_componentwise_PRECISION(cuda_vector_PRECISION eta,
-                                                     cuda_vector_PRECISION phi,
-                                                     cuda_config_PRECISION clover,
-                                                     int num_sites, level_struct *l) {
-
-  constexpr size_t blockSize = 128;
-
-  const size_t gridSize = minGridSizeForN(num_sites, blockSize);
-  cuda_site_diag_ee_componentwise_PRECISION<<<gridSize, blockSize>>>(eta, phi, clover, num_sites);
-  cuda_safe_call(cudaDeviceSynchronize());
-}
-
-extern "C" void cuda_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECISION eta,
-                                                         cuda_vector_PRECISION phi,
-                                                         cuda_config_PRECISION clover,
-                                                         int num_sites, level_struct *l) {
-
-  constexpr size_t blockSize = 128;
-
-  const size_t gridSize = minGridSizeForN(num_sites, blockSize);
-  cuda_site_diag_oo_inv_componentwise_PRECISION<<<gridSize, blockSize>>>(eta, phi, clover, num_sites);
-  cuda_safe_call(cudaDeviceSynchronize());
-}
-
-/** \brief Calculates the self-coupling term eta = D_sc phi.
- * 
  *  Vectors must be in componentwise ordering.
  * 
  *  \param[out]   eta           eta in eta = D_sc phi.
@@ -329,7 +283,9 @@ void cuda_d_plus_clover_PRECISION(
   if ( g.csw == 0.0 ) {
     cuda_vector_PRECISION_scale(eta, phi, shift, 0, l->inner_vector_size, l, _CUDA_SYNC, 0, streams);
   } else {
-    _cuda_clover_componentwise_PRECISION(eta, phi, op->clover_componentwise_gpu, l->num_inner_lattice_sites, l);
+    PROF_PRECISION_START_UNTHREADED( _SC );
+    cuda_op_clover_PRECISION(eta, phi, op, 0, l->num_inner_lattice_sites, l);
+    PROF_PRECISION_STOP_UNTHREADED( _SC, 1 );
   }
 
   PROF_PRECISION_START_UNTHREADED( _NC );

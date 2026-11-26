@@ -4034,7 +4034,7 @@ void cuda_apply_schur_complement_PRECISION( cuda_vector_PRECISION out,
                                l->inner_vector_size, l, _CUDA_SYNC, 0, streams);
 
   PROF_PRECISION_START_UNTHREADED( _SC );
-  cuda_diag_ee_componentwise_PRECISION(out, in, op->clover_componentwise_gpu, op->num_even_sites, l);
+  cuda_op_diag_ee_PRECISION(out, in, op, 0, op->num_even_sites, l);
   PROF_PRECISION_STOP_UNTHREADED( _SC, 1 );
 
   PROF_PRECISION_START_UNTHREADED( _NC );
@@ -4042,8 +4042,7 @@ void cuda_apply_schur_complement_PRECISION( cuda_vector_PRECISION out,
   PROF_PRECISION_STOP_UNTHREADED( _NC, 0 );
 
   PROF_PRECISION_START_UNTHREADED( _SC );
-  cuda_diag_oo_inv_componentwise_PRECISION( tmp1+start_odd, tmp0+start_odd,
-                                            op->clover_componentwise_gpu+css*(start_odd/12),
+  cuda_op_diag_oo_inv_PRECISION( tmp1+start_odd, tmp0+start_odd, op, op->num_even_sites,
                                             op->num_odd_sites, l );
   PROF_PRECISION_STOP_UNTHREADED( _SC, 0 );
 
@@ -4401,8 +4400,7 @@ void cuda_solve_oddeven_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION
 
   // odd to even
   PROF_PRECISION_START_UNTHREADED( _SC );
-  cuda_diag_oo_inv_componentwise_PRECISION( tmp+start_odd, b+start_odd,
-                                            op->clover_componentwise_gpu+css*(start_odd/12),
+  cuda_op_diag_oo_inv_PRECISION( tmp+start_odd, b+start_odd, op, op->num_even_sites,
                                             op->num_odd_sites, l );
   PROF_PRECISION_STOP_UNTHREADED( _SC, 0 );
 
@@ -4438,8 +4436,7 @@ void cuda_solve_oddeven_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION
     //bicgstab_PRECISION( p, l, threading );
   }
 
-  cuda_diag_oo_inv_componentwise_PRECISION( x+start_odd, b+start_odd,
-                                            op->clover_componentwise_gpu+css*(start_odd/12),
+  cuda_op_diag_oo_inv_PRECISION( x+start_odd, b+start_odd, op, op->num_even_sites,
                                             op->num_odd_sites, l );
 
   // even to odd
@@ -4451,8 +4448,7 @@ void cuda_solve_oddeven_PRECISION( gmres_PRECISION_struct *p, operator_PRECISION
   PROF_PRECISION_STOP_UNTHREADED( _NC, 1 );
 
   PROF_PRECISION_START_UNTHREADED( _SC );
-  cuda_diag_oo_inv_componentwise_PRECISION( b+start_odd, tmp+start_odd,
-                                            op->clover_componentwise_gpu+css*(start_odd/12),
+  cuda_op_diag_oo_inv_PRECISION( b+start_odd, tmp+start_odd, op, op->num_even_sites,
                                             op->num_odd_sites, l );
   PROF_PRECISION_STOP_UNTHREADED( _SC, 1 );
 

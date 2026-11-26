@@ -19,6 +19,8 @@ extern "C" void cuda_half_ops_PRECISION_init( operator_PRECISION_struct *op ) {
     op->Ds_half_gpu[mu] = NULL;
     op->Ds_half_scale[mu] = 1.0f;
   }
+  op->clover_half_gpu = NULL;
+  op->clover_half_scale = 1.0f;
   op->half_valid = 0;
 }
 
@@ -28,9 +30,11 @@ extern "C" void cuda_half_ops_PRECISION_invalidate( operator_PRECISION_struct *o
 
 extern "C" void cuda_half_ops_PRECISION_free( operator_PRECISION_struct *op, level_struct *l ) {
   const size_t n = l->num_inner_lattice_sites;
+  const unsigned int css = clover_site_size( l->num_lattice_site_var, l->depth );
   for ( int mu=0; mu<4; mu++ ) {
     if ( op->Ds_half_gpu[mu] != NULL ) CUDA_FREE( op->Ds_half_gpu[mu], __half2, 9*n );
   }
+  if ( op->clover_half_gpu != NULL ) CUDA_FREE( op->clover_half_gpu, __half2, css*n );
   op->half_valid = 0;
 }
 
@@ -41,16 +45,53 @@ extern "C" int cuda_half_ops_PRECISION( operator_PRECISION_struct *op, level_str
 
   // build the half-precision copies from the float arrays (same componentwise layout)
   const size_t n = l->num_inner_lattice_sites;
+  const unsigned int css = clover_site_size( l->num_lattice_site_var, l->depth );
   for ( int mu=0; mu<4; mu++ ) {
     if ( op->Ds_half_gpu[mu] == NULL ) CUDA_MALLOC( op->Ds_half_gpu[mu], __half2, 9*n );
     op->Ds_half_scale[mu] = cuda_complex_float_to_half( (__half2*) op->Ds_half_gpu[mu],
                                                         (cuFloatComplex const*) op->Ds_componentwise_gpu[mu], 9*n );
+  }
+  if ( g.csw != 0 ) {
+    if ( op->clover_half_gpu == NULL ) CUDA_MALLOC( op->clover_half_gpu, __half2, css*n );
+    op->clover_half_scale = cuda_complex_float_to_half( (__half2*) op->clover_half_gpu,
+                                                        (cuFloatComplex const*) op->clover_componentwise_gpu, css*n );
   }
   op->half_valid = 1;
   return 1;
 #else
   return 0;
 #endif
+}
+
+// the three self-coupling launchers: same launch configuration as in cuda_dirac_generic.cu
+#define CUDA_OP_CLOVER_LAUNCH( kernel ) do { \
+  constexpr size_t blockSize = 128; \
+  const size_t gridSize = minGridSizeForN( num_sites, blockSize ); \
+  const unsigned int css = clover_site_size( l->num_lattice_site_var, l->depth ); \
+  if ( cuda_half_ops_PRECISION( op, l ) && op->clover_half_gpu != NULL ) { \
+    kernel##_half_PRECISION<<<gridSize, blockSize>>>( eta, phi, ((__half2 const*) op->clover_half_gpu) + css*start, \
+                                                      op->clover_half_scale, num_sites ); \
+  } else { \
+    kernel##_PRECISION<<<gridSize, blockSize>>>( eta, phi, op->clover_componentwise_gpu + css*start, num_sites ); \
+  } \
+  cuda_safe_call( cudaDeviceSynchronize() ); } while(0)
+
+void cuda_op_clover_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi,
+                               operator_PRECISION_struct *op, size_t start, int num_sites,
+                               level_struct *l ) {
+  CUDA_OP_CLOVER_LAUNCH( cuda_site_clover_componentwise );
+}
+
+void cuda_op_diag_ee_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi,
+                                operator_PRECISION_struct *op, size_t start, int num_sites,
+                                level_struct *l ) {
+  CUDA_OP_CLOVER_LAUNCH( cuda_site_diag_ee_componentwise );
+}
+
+void cuda_op_diag_oo_inv_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISION phi,
+                                    operator_PRECISION_struct *op, size_t start, int num_sites,
+                                    level_struct *l ) {
+  CUDA_OP_CLOVER_LAUNCH( cuda_site_diag_oo_inv_componentwise );
 }
 
 #ifdef CUDA_HALF_TEST
@@ -102,7 +143,12 @@ extern "C" void cuda_half_ops_PRECISION_test( level_struct *l ) {
   }
 
   operator_PRECISION_struct *oe_op = &(l->oe_op_PRECISION);
-  if ( oe_op->Ds_componentwise_gpu[0] != NULL ) {
+  if ( oe_op->clover_componentwise_gpu != NULL && oe_op->Ds_componentwise_gpu[0] != NULL ) {
+    const size_t start_odd = (size_t) oe_op->num_even_sites * l->num_lattice_site_var;
+    CUDA_HALF_TEST_COMPARE( "odd-even D_oo^-1", 
+      cuda_op_diag_oo_inv_PRECISION( y+start_odd, x+start_odd, oe_op, oe_op->num_even_sites, oe_op->num_odd_sites, l ) );
+    CUDA_HALF_TEST_COMPARE( "odd-even D_ee",
+      cuda_op_diag_ee_PRECISION( y, x, oe_op, 0, oe_op->num_even_sites, l ) );
     CUDA_HALF_TEST_COMPARE( "odd-even hopping D_eo",
       cuda_hopping_term_PRECISION( y, x, oe_op, _EVEN_SITES, l ) );
     CUDA_HALF_TEST_COMPARE( "Schur complement",

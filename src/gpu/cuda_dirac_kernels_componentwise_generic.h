@@ -77,7 +77,16 @@ __global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* 
                                                             int const* neighbors, size_t start,
                                                             size_t num_sites);
 
-// Same two kernels with the links read from args.Dh (half precision, one scale per direction).
+// The clover kernels with the clover term stored in half precision with one scale per array
+// (see cuda_half.h).
+__global__ void cuda_site_clover_componentwise_half_PRECISION(cuda_vector_PRECISION eta,
+    cu_cmplx_PRECISION const* phi, __half2 const* clover, float scale, size_t num_sites);
+__global__ void cuda_site_diag_ee_componentwise_half_PRECISION(cuda_vector_PRECISION eta,
+    cu_cmplx_PRECISION const* phi, __half2 const* clover, float scale, size_t num_sites);
+__global__ void cuda_site_diag_oo_inv_componentwise_half_PRECISION(cuda_vector_PRECISION eta,
+    cu_cmplx_PRECISION const* phi, __half2 const* clover, float scale, size_t num_sites);
+
+// The two hopping kernels with the links read from args.Dh (half precision, one scale per direction).
 __global__ void cuda_hopping_project_componentwise_half_PRECISION(cuda_hopping_args_PRECISION args,
                                                                   cu_cmplx_PRECISION const* phi,
                                                                   int const* neighbors, size_t start,

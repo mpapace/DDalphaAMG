@@ -18,6 +18,7 @@ extern "C"{
 }
 
 #include "cuda_componentwise.h"
+#include "cuda_half_ops_PRECISION.h"
 
 #ifdef CUDA_OPT
 
@@ -880,7 +881,7 @@ static void smoother_oe_prepare_core_PRECISION( level_struct *l ) {
   cuda_safe_call( cudaDeviceSynchronize() );
 
   // odd to even: b_e <- b_e + D_eo ( - D_oo^-1 b_o )
-  cuda_diag_oo_inv_componentwise_PRECISION( tmp+start_odd, b_cw+start_odd, op->clover_componentwise_gpu+css*n_even,
+  cuda_op_diag_oo_inv_PRECISION( tmp+start_odd, b_cw+start_odd, op, n_even,
                                             n_odd, l );
   cuda_vector_PRECISION_scale( tmp, tmp, make_cu_cmplx_PRECISION(-1.0,0.0), start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
   cuda_hopping_term_PRECISION( b_cw, tmp, op, _EVEN_SITES, l );
@@ -905,11 +906,11 @@ static void smoother_oe_finish_core_PRECISION( vector_PRECISION phi, level_struc
   cuda_vector_PRECISION b_cw = is->oe_b_gpu, x_cw = is->oe_x_gpu, tmp = op->buffer_gpu[0];
 
   // x_o = D_oo^-1 b_o - D_oo^-1 D_oe x_e   (b_o = r_o, untouched by the preparation)
-  cuda_diag_oo_inv_componentwise_PRECISION( x_cw+start_odd, b_cw+start_odd, op->clover_componentwise_gpu+css*n_even,
+  cuda_op_diag_oo_inv_PRECISION( x_cw+start_odd, b_cw+start_odd, op, n_even,
                                             n_odd, l );
   cuda_vector_PRECISION_define( tmp, make_cu_cmplx_PRECISION(0,0), start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
   cuda_hopping_term_PRECISION( tmp, x_cw, op, _ODD_SITES, l );
-  cuda_diag_oo_inv_componentwise_PRECISION( b_cw+start_odd, tmp+start_odd, op->clover_componentwise_gpu+css*n_even,
+  cuda_op_diag_oo_inv_PRECISION( b_cw+start_odd, tmp+start_odd, op, n_even,
                                             n_odd, l );
   cuda_vector_PRECISION_minus( x_cw, x_cw, b_cw, start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
   cuda_safe_call( cudaDeviceSynchronize() );

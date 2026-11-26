@@ -13,9 +13,10 @@
 #include "clifford.h"
 #undef CU_OVERWRITE_I
 
-__global__ void cuda_site_clover_componentwise_PRECISION(cuda_vector_PRECISION eta,
+template <typename DT>
+__device__ __forceinline__ void cuda_site_clover_componentwise_body_PRECISION(cuda_vector_PRECISION eta,
                                                          cu_cmplx_PRECISION const* phi,
-                                                         cu_cmplx_PRECISION const* clover,
+                                                         DT const* clover, float scale,
                                                          size_t num_sites) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_sites) {
@@ -25,7 +26,7 @@ __global__ void cuda_site_clover_componentwise_PRECISION(cuda_vector_PRECISION e
   auto caEta = ComponentAccess(eta + idx, num_sites);
   auto caPhi = ComponentAccess(phi + idx, num_sites);
   // clover += idx;
-  auto caClover = ComponentAccess(clover + idx, num_sites);
+  auto caClover = make_op_access<cu_cmplx_PRECISION>(clover + idx, num_sites, scale);
 
   // diagonal
   caEta[0] = caClover[0] * caPhi[0];
@@ -104,9 +105,10 @@ __global__ void cuda_site_clover_componentwise_PRECISION(cuda_vector_PRECISION e
   caEta[11] += cu_conj_PRECISION(caClover[41]) * caPhi[10];
 }
 
-__global__ void cuda_site_diag_ee_componentwise_PRECISION(cuda_vector_PRECISION eta,
+template <typename DT>
+__device__ __forceinline__ void cuda_site_diag_ee_componentwise_body_PRECISION(cuda_vector_PRECISION eta,
                                                           cu_cmplx_PRECISION const* phi,
-                                                          cu_cmplx_PRECISION const* clover,
+                                                          DT const* clover, float scale,
                                                           size_t num_sites) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_sites) {
@@ -116,7 +118,7 @@ __global__ void cuda_site_diag_ee_componentwise_PRECISION(cuda_vector_PRECISION 
   auto caEta = ComponentAccess(eta + idx, num_sites);
   auto caPhi = ComponentAccess(phi + idx, num_sites);
   // clover += idx;
-  auto caClover = ComponentAccess(clover + idx, num_sites);
+  auto caClover = make_op_access<cu_cmplx_PRECISION>(clover + idx, num_sites, scale);
 
   int i, j, k=0, n;
   cu_cmplx_PRECISION z[6];
@@ -148,9 +150,10 @@ __global__ void cuda_site_diag_ee_componentwise_PRECISION(cuda_vector_PRECISION 
   }
 }
 
-__global__ void cuda_site_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECISION eta,
+template <typename DT>
+__device__ __forceinline__ void cuda_site_diag_oo_inv_componentwise_body_PRECISION(cuda_vector_PRECISION eta,
                                                               cu_cmplx_PRECISION const* phi,
-                                                              cu_cmplx_PRECISION const* clover,
+                                                              DT const* clover, float scale,
                                                               size_t num_sites) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_sites) {
@@ -160,7 +163,7 @@ __global__ void cuda_site_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECIS
   auto caEta = ComponentAccess(eta + idx, num_sites);
   auto caPhi = ComponentAccess(phi + idx, num_sites);
   // clover += idx;
-  auto caClover = ComponentAccess(clover + idx, num_sites);
+  auto caClover = make_op_access<cu_cmplx_PRECISION>(clover + idx, num_sites, scale);
 
   int i, j, k=0, n;
 
@@ -370,4 +373,35 @@ __global__ void cuda_hopping_gather_componentwise_half_PRECISION(cu_cmplx_PRECIS
                                                             int const* neighbors, size_t start,
                                                             size_t num_sites) {
   cuda_hopping_gather_componentwise_body_PRECISION<true>(eta, args, neighbors, start, num_sites);
+}
+
+// clover term, D_ee and D_oo^-1 with float/double (scale 1) or half-precision clover data
+__global__ void cuda_site_clover_componentwise_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    cu_cmplx_PRECISION const* clover, size_t num_sites) {
+  cuda_site_clover_componentwise_body_PRECISION(eta, phi, clover, 1.0f, num_sites);
+}
+
+__global__ void cuda_site_clover_componentwise_half_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    __half2 const* clover, float scale, size_t num_sites) {
+  cuda_site_clover_componentwise_body_PRECISION(eta, phi, clover, scale, num_sites);
+}
+
+__global__ void cuda_site_diag_ee_componentwise_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    cu_cmplx_PRECISION const* clover, size_t num_sites) {
+  cuda_site_diag_ee_componentwise_body_PRECISION(eta, phi, clover, 1.0f, num_sites);
+}
+
+__global__ void cuda_site_diag_ee_componentwise_half_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    __half2 const* clover, float scale, size_t num_sites) {
+  cuda_site_diag_ee_componentwise_body_PRECISION(eta, phi, clover, scale, num_sites);
+}
+
+__global__ void cuda_site_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    cu_cmplx_PRECISION const* clover, size_t num_sites) {
+  cuda_site_diag_oo_inv_componentwise_body_PRECISION(eta, phi, clover, 1.0f, num_sites);
+}
+
+__global__ void cuda_site_diag_oo_inv_componentwise_half_PRECISION(cuda_vector_PRECISION eta, cu_cmplx_PRECISION const* phi,
+    __half2 const* clover, float scale, size_t num_sites) {
+  cuda_site_diag_oo_inv_componentwise_body_PRECISION(eta, phi, clover, scale, num_sites);
 }
