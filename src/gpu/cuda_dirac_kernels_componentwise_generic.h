@@ -39,109 +39,39 @@ __global__ void cuda_site_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECIS
                                                               cu_cmplx_PRECISION const* clover,
                                                               size_t num_sites);
 
-__global__ void cuda_prp_T_componentwise_PRECISION(cu_cmplx_PRECISION* prpT,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prn_T_componentwise_PRECISION(cu_cmplx_PRECISION* prnT,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prp_Z_componentwise_PRECISION(cu_cmplx_PRECISION* prpZ,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prn_Z_componentwise_PRECISION(cu_cmplx_PRECISION* prnZ,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prp_Y_componentwise_PRECISION(cu_cmplx_PRECISION* prpY,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prn_Y_componentwise_PRECISION(cu_cmplx_PRECISION* prnY,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prp_X_componentwise_PRECISION(cu_cmplx_PRECISION* prpX,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
-
-__global__ void cuda_prn_X_componentwise_PRECISION(cu_cmplx_PRECISION* prnX,
-                                                   cu_cmplx_PRECISION const* phi, size_t num_sites);
+/**
+ * Fused hopping term (one kernel for the projection side, one for the gather side).
+ *
+ * Buffers (op->prn*_gpu, op->prp*_gpu): prn[mu] holds (1 - gamma_mu) phi at the site itself,
+ * prp[mu] holds U_mu^H (1 + gamma_mu) phi scattered to the +mu neighbor; both in chunks of 6 per
+ * site, indexed by the site index of the whole lattice (including the ghost region), which is the
+ * layout the ghost exchange expects. Directions: 0 = T, 1 = Z, 2 = Y, 3 = X.
+ */
+typedef struct {
+  cu_cmplx_PRECISION* prn[4];      // (1 - gamma_mu) phi, at the site
+  cu_cmplx_PRECISION* prp[4];      // U_mu^H (1 + gamma_mu) phi, at the +mu neighbor
+  cu_cmplx_PRECISION const* D[4];  // links, componentwise with stride num_sites, offset to the first site
+} cuda_hopping_args_PRECISION;
 
 /**
- * \brief Applies the matrix vector products as required for the projection in negative direction.
- *
- * This kernel must be invoked with double as many (total across blocks) threads as there are
- * inner lattice sites. This is done in order to expose full parralelism for the 3x3 matrix vector
- * multiplications.
- *
- * \param[out]  prp_buf   The projection buffer to which the result is written.
- * \param[in]   D         The Wilson-Dirac matrix in the form used throughout this project.
- * \param[in]   pbuf      The vector prepared by a previous call to cuda_prn_*_PRECISION.
- * \param[in]   neighbors The neighbor table containing the neighbors in all 4 directions.
- *                        See also operator_PRECISION_struct::neighbor_table.
- * \param[in]   dim       The direction in which the projection is performed.
- * \param[in]   num_sites The number of lattice sites for which the projection will be performed.
- *                        Note that even though this is the number of inner lattice site, sites
- *                        outside of that range will be written to in prp_buf if they are neighbors
- *                        to an inner lattice site.
+ * Projection side. Thread i handles site start+i of the source parity (or of the whole lattice):
+ * reads phi once (componentwise, stride num_sites, phi offset to the first site) and writes
+ * prn[mu][start+i] and prp[mu][neighbors[4*i+mu]] for the four directions.
+ * neighbors must be offset to the first site (neighbor_table + 4*start).
  */
-__global__ void cuda_prn_mvmh_componentwise_PRECISION(cu_cmplx_PRECISION* prp_buf,
-                                                      cu_cmplx_PRECISION const* D,
-                                                      cu_cmplx_PRECISION const* pbuf,
-                                                      int const* neighbors, LatticeAxis dim,
-                                                      size_t num_sites);
+__global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_PRECISION args,
+                                                             cu_cmplx_PRECISION const* phi,
+                                                             int const* neighbors, size_t start,
+                                                             size_t num_sites);
 
 /**
- * \brief Applies the matrix vector products as required for the projection in positive direction.
- *
- * This kernel must be invoked with double as many (total across blocks) threads as there are
- * inner lattice sites. This is done in order to expose full parralelism for the 3x3 matrix vector
- * multiplications.
- *
- * \param[in]   pbuf      The result vector prepared for a subsequent call to
- *                        cuda_pbp_su3_*_PRECISION.
- * \param[in]   D         The Wilson-Dirac matrix in the form used throughout this project.
- * \param[out]  prn_buf   The negative projection vector as previously calculated and communicated.
- * \param[in]   neighbors The neighbor table containing the neighbors in all 4 directions.
- *                        See also operator_PRECISION_struct::neighbor_table.
- * \param[in]   dim       The direction in which the projection is performed.
- * \param[in]   num_sites The number of lattice sites for which the projection will be performed.
- *                        Note that even though this is the number of inner lattice site, sites
- *                        outside of that range will be read in prn_buf if they are neighbors
- *                        to an inner lattice site.
+ * Gather side. Thread i handles site start+i of the target parity (or of the whole lattice):
+ * eta += sum_mu [ lift_+(U_mu prn[mu][neighbors[4*i+mu]]) + lift_-(prp[mu][start+i]) ],
+ * with eta read and written once (componentwise, stride num_sites, offset to the first site).
  */
-__global__ void cuda_pbp_su3_mvm_componentwise_PRECISION(cu_cmplx_PRECISION* pbuf,
-                                                         cu_cmplx_PRECISION const* D,
-                                                         cu_cmplx_PRECISION const* prn_buf,
-                                                         int const* neighbors, LatticeAxis dim,
-                                                         size_t num_sites);
-
-__global__ void cuda_pbp_su3_T_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbp_su3_Z_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbp_su3_Y_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbp_su3_X_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbn_su3_T_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpT,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbn_su3_Z_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpZ,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbn_su3_Y_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpY,
-                                                       size_t num_sites);
-
-__global__ void cuda_pbn_su3_X_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpX,
-                                                       size_t num_sites);
+__global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
+                                                            cuda_hopping_args_PRECISION args,
+                                                            int const* neighbors, size_t start,
+                                                            size_t num_sites);
 
 #endif  // CUDA_DIRAC_KERNELS_COMPONENTWISE_PRECISION_H

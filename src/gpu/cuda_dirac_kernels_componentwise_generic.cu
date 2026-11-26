@@ -4,7 +4,6 @@
 #include "cuda_complex_operators_PRECISION.h"
 #include "cuda_componentwise.h"
 #include "cuda_dirac_kernels_componentwise_PRECISION.h"
-#include "cuda_mvm_PRECISION.h"
 #include "global_enums.h"
 
 // The clifford header uses a C compiler extension version of I that is not compatible with CUDA.
@@ -194,495 +193,138 @@ __global__ void cuda_site_diag_oo_inv_componentwise_PRECISION(cuda_vector_PRECIS
   }
 }
 
-__global__ void cuda_prp_T_componentwise_PRECISION(cu_cmplx_PRECISION* prpT,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpT[6 * diracCommonBlockSize];
-  auto localPrpT = sharedPrpT + 6 * threadIdx.x;
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  // there is no more site for this index
-  if (idx >= num_sites) goto copymem;
-  localPrpT[0] = caPhi[0] - GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 0];
-  localPrpT[1] = caPhi[1] - GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 1];
-  localPrpT[2] = caPhi[2] - GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 2];
-  localPrpT[3] = caPhi[3] - GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 0];
-  localPrpT[4] = caPhi[4] - GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 1];
-  localPrpT[5] = caPhi[5] - GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 2];
-copymem:
-  __syncthreads();
-  // advance prpT to first element of block
-  prpT += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(prpT, sharedPrpT, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-}
+// ---------------------------------------------------------------------------------------------
+// Fused hopping term
+// ---------------------------------------------------------------------------------------------
 
-__global__ void cuda_prn_T_componentwise_PRECISION(cu_cmplx_PRECISION* prnT,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
+// 6 consecutive complex numbers (one chunk of a prp/prn buffer): 16-byte loads and stores.
+// The chunks start at multiples of 6 elements of a cudaMalloc'ed buffer, so they are 16-byte aligned.
+__device__ inline void hopping_load6_PRECISION(cu_cmplx_PRECISION* v, cu_cmplx_PRECISION const* p) {
+  if constexpr (sizeof(cu_cmplx_PRECISION) == 8) {
+    float4 const* q = reinterpret_cast<float4 const*>(p);
+#pragma unroll
+    for (int k = 0; k < 3; k++) {
+      const float4 a = q[k];
+      v[2 * k].x = a.x; v[2 * k].y = a.y; v[2 * k + 1].x = a.z; v[2 * k + 1].y = a.w;
+    }
+  } else {
+#pragma unroll
+    for (int k = 0; k < 6; k++) v[k] = p[k];
   }
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  auto caPrnT = ComponentAccess(prnT + idx, num_sites);
-  caPrnT[0] = caPhi[0] + GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 0];
-  caPrnT[1] = caPhi[1] + GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 1];
-  caPrnT[2] = caPhi[2] + GAMMA_T_SPIN0_VAL * caPhi[3 * GAMMA_T_SPIN0_CO + 2];
-  caPrnT[3] = caPhi[3] + GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 0];
-  caPrnT[4] = caPhi[4] + GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 1];
-  caPrnT[5] = caPhi[5] + GAMMA_T_SPIN1_VAL * caPhi[3 * GAMMA_T_SPIN1_CO + 2];
 }
 
-__global__ void cuda_prp_Z_componentwise_PRECISION(cu_cmplx_PRECISION* prpZ,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpZ[6 * diracCommonBlockSize];
-  auto localPrpZ = sharedPrpZ + 6 * threadIdx.x;
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  // there is no more site for this index
-  if (idx >= num_sites) goto copymem;
-  localPrpZ[0] = caPhi[0] - GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 0];
-  localPrpZ[1] = caPhi[1] - GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 1];
-  localPrpZ[2] = caPhi[2] - GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 2];
-  localPrpZ[3] = caPhi[3] - GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 0];
-  localPrpZ[4] = caPhi[4] - GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 1];
-  localPrpZ[5] = caPhi[5] - GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 2];
-copymem:
-  __syncthreads();
-  // advance prpZ to first element of block
-  prpZ += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(prpZ, sharedPrpZ, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
+__device__ inline void hopping_store6_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_PRECISION const* v) {
+  if constexpr (sizeof(cu_cmplx_PRECISION) == 8) {
+    float4* q = reinterpret_cast<float4*>(p);
+#pragma unroll
+    for (int k = 0; k < 3; k++) q[k] = make_float4(v[2 * k].x, v[2 * k].y, v[2 * k + 1].x, v[2 * k + 1].y);
+  } else {
+#pragma unroll
+    for (int k = 0; k < 6; k++) p[k] = v[k];
+  }
 }
 
-__global__ void cuda_prn_Z_componentwise_PRECISION(cu_cmplx_PRECISION* prnZ,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
+// projection side for one direction (DIR = T, Z, Y or X, mu its index)
+#define HOPPING_PROJECT_DIR_PRECISION( DIR, mu ) do {                                            \
+    cu_cmplx_PRECISION pm[6], pp[6], r[6], U[9];                                                \
+    _Pragma("unroll")                                                                            \
+    for (int c = 0; c < 3; c++) {                                                                \
+      pm[c]     = x[c]     - GAMMA_##DIR##_SPIN0_VAL * x[3 * GAMMA_##DIR##_SPIN0_CO + c];         \
+      pm[3 + c] = x[3 + c] - GAMMA_##DIR##_SPIN1_VAL * x[3 * GAMMA_##DIR##_SPIN1_CO + c];         \
+      pp[c]     = x[c]     + GAMMA_##DIR##_SPIN0_VAL * x[3 * GAMMA_##DIR##_SPIN0_CO + c];         \
+      pp[3 + c] = x[3 + c] + GAMMA_##DIR##_SPIN1_VAL * x[3 * GAMMA_##DIR##_SPIN1_CO + c];         \
+    }                                                                                            \
+    hopping_store6_PRECISION(args.prn[mu] + 6 * (start + idx), pm);                              \
+    auto caD = ComponentAccess(args.D[mu] + idx, num_sites);                                     \
+    _Pragma("unroll")                                                                            \
+    for (int k = 0; k < 9; k++) U[k] = caD[k];                                                   \
+    /* r = U^H pp, for both spin halves */                                                       \
+    _Pragma("unroll")                                                                            \
+    for (int h = 0; h < 2; h++) {                                                                \
+      _Pragma("unroll")                                                                          \
+      for (int i = 0; i < 3; i++) {                                                              \
+        r[3 * h + i] = cu_conj_PRECISION(U[i]) * pp[3 * h];                                      \
+        r[3 * h + i] += cu_conj_PRECISION(U[3 + i]) * pp[3 * h + 1];                             \
+        r[3 * h + i] += cu_conj_PRECISION(U[6 + i]) * pp[3 * h + 2];                             \
+      }                                                                                          \
+    }                                                                                            \
+    hopping_store6_PRECISION(args.prp[mu] + 6 * (size_t) neighbors[4 * idx + mu], r);           \
+  } while (0)
+
+__global__ void cuda_hopping_project_componentwise_PRECISION(cuda_hopping_args_PRECISION args,
+                                                             cu_cmplx_PRECISION const* phi,
+                                                             int const* neighbors, size_t start,
+                                                             size_t num_sites) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_sites) {
     // there is no more site for this index
     return;
   }
   auto caPhi = ComponentAccess(phi + idx, num_sites);
-  auto caPrnZ = ComponentAccess(prnZ + idx, num_sites);
-  caPrnZ[0] = caPhi[0] + GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 0];
-  caPrnZ[1] = caPhi[1] + GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 1];
-  caPrnZ[2] = caPhi[2] + GAMMA_Z_SPIN0_VAL * caPhi[3 * GAMMA_Z_SPIN0_CO + 2];
-  caPrnZ[3] = caPhi[3] + GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 0];
-  caPrnZ[4] = caPhi[4] + GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 1];
-  caPrnZ[5] = caPhi[5] + GAMMA_Z_SPIN1_VAL * caPhi[3 * GAMMA_Z_SPIN1_CO + 2];
+  cu_cmplx_PRECISION x[12];
+#pragma unroll
+  for (int i = 0; i < 12; i++) x[i] = caPhi[i];
+
+  HOPPING_PROJECT_DIR_PRECISION(T, 0);
+  HOPPING_PROJECT_DIR_PRECISION(Z, 1);
+  HOPPING_PROJECT_DIR_PRECISION(Y, 2);
+  HOPPING_PROJECT_DIR_PRECISION(X, 3);
 }
 
-__global__ void cuda_prp_Y_componentwise_PRECISION(cu_cmplx_PRECISION* prpY,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpY[6 * diracCommonBlockSize];
-  auto localPrpY = sharedPrpY + 6 * threadIdx.x;
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  // there is no more site for this index
-  if (idx >= num_sites) goto copymem;
-  localPrpY[0] = caPhi[0] - GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 0];
-  localPrpY[1] = caPhi[1] - GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 1];
-  localPrpY[2] = caPhi[2] - GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 2];
-  localPrpY[3] = caPhi[3] - GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 0];
-  localPrpY[4] = caPhi[4] - GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 1];
-  localPrpY[5] = caPhi[5] - GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 2];
-copymem:
-  __syncthreads();
-  // advance prpY to first element of block
-  prpY += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(prpY, sharedPrpY, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-}
+// gather side for one direction (DIR = T, Z, Y or X, mu its index)
+#define HOPPING_GATHER_DIR_PRECISION( DIR, mu ) do {                                             \
+    cu_cmplx_PRECISION g[6], u[6], U[9];                                                        \
+    /* forward hop: u = U_mu (1 - gamma_mu) phi(x + mu), lifted as in pbp_su3 */                 \
+    hopping_load6_PRECISION(g, args.prn[mu] + 6 * (size_t) neighbors[4 * idx + mu]);            \
+    auto caD = ComponentAccess(args.D[mu] + idx, num_sites);                                     \
+    _Pragma("unroll")                                                                            \
+    for (int k = 0; k < 9; k++) U[k] = caD[k];                                                   \
+    _Pragma("unroll")                                                                            \
+    for (int h = 0; h < 2; h++) {                                                                \
+      _Pragma("unroll")                                                                          \
+      for (int i = 0; i < 3; i++) {                                                              \
+        u[3 * h + i] = U[3 * i] * g[3 * h];                                                      \
+        u[3 * h + i] += U[3 * i + 1] * g[3 * h + 1];                                             \
+        u[3 * h + i] += U[3 * i + 2] * g[3 * h + 2];                                             \
+      }                                                                                          \
+    }                                                                                            \
+    _Pragma("unroll")                                                                            \
+    for (int c = 0; c < 3; c++) {                                                                \
+      e[c] -= u[c];                                                                              \
+      e[3 + c] -= u[3 + c];                                                                      \
+      e[6 + c] += GAMMA_##DIR##_SPIN2_VAL * u[3 * GAMMA_##DIR##_SPIN2_CO + c];                   \
+      e[9 + c] += GAMMA_##DIR##_SPIN3_VAL * u[3 * GAMMA_##DIR##_SPIN3_CO + c];                   \
+    }                                                                                            \
+    /* backward hop: U_mu^H (1 + gamma_mu) phi(x - mu), already in prp at this site (pbn_su3) */ \
+    hopping_load6_PRECISION(g, args.prp[mu] + 6 * (start + idx));                                \
+    _Pragma("unroll")                                                                            \
+    for (int c = 0; c < 3; c++) {                                                                \
+      e[c] -= g[c];                                                                              \
+      e[3 + c] -= g[3 + c];                                                                      \
+      e[6 + c] -= GAMMA_##DIR##_SPIN2_VAL * g[3 * GAMMA_##DIR##_SPIN2_CO + c];                   \
+      e[9 + c] -= GAMMA_##DIR##_SPIN3_VAL * g[3 * GAMMA_##DIR##_SPIN3_CO + c];                   \
+    }                                                                                            \
+  } while (0)
 
-__global__ void cuda_prn_Y_componentwise_PRECISION(cu_cmplx_PRECISION* prnY,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  auto caPrnY = ComponentAccess(prnY + idx, num_sites);
-  caPrnY[0] = caPhi[0] + GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 0];
-  caPrnY[1] = caPhi[1] + GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 1];
-  caPrnY[2] = caPhi[2] + GAMMA_Y_SPIN0_VAL * caPhi[3 * GAMMA_Y_SPIN0_CO + 2];
-  caPrnY[3] = caPhi[3] + GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 0];
-  caPrnY[4] = caPhi[4] + GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 1];
-  caPrnY[5] = caPhi[5] + GAMMA_Y_SPIN1_VAL * caPhi[3 * GAMMA_Y_SPIN1_CO + 2];
-}
-
-__global__ void cuda_prp_X_componentwise_PRECISION(cu_cmplx_PRECISION* prpX,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpX[6 * diracCommonBlockSize];
-  auto localPrpX = sharedPrpX + 6 * threadIdx.x;
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  // there is no more site for this index
-  if (idx >= num_sites) goto copymem;
-  localPrpX[0] = caPhi[0] - GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 0];
-  localPrpX[1] = caPhi[1] - GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 1];
-  localPrpX[2] = caPhi[2] - GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 2];
-  localPrpX[3] = caPhi[3] - GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 0];
-  localPrpX[4] = caPhi[4] - GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 1];
-  localPrpX[5] = caPhi[5] - GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 2];
-copymem:
-  __syncthreads();
-  // advance prpY to first element of block
-  prpX += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(prpX, sharedPrpX, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-}
-
-__global__ void cuda_prn_X_componentwise_PRECISION(cu_cmplx_PRECISION* prnX,
-                                                   cu_cmplx_PRECISION const* phi,
-                                                   size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caPhi = ComponentAccess(phi + idx, num_sites);
-  auto caPrnX = ComponentAccess(prnX + idx, num_sites);
-  caPrnX[0] = caPhi[0] + GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 0];
-  caPrnX[1] = caPhi[1] + GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 1];
-  caPrnX[2] = caPhi[2] + GAMMA_X_SPIN0_VAL * caPhi[3 * GAMMA_X_SPIN0_CO + 2];
-  caPrnX[3] = caPhi[3] + GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 0];
-  caPrnX[4] = caPhi[4] + GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 1];
-  caPrnX[5] = caPhi[5] + GAMMA_X_SPIN1_VAL * caPhi[3 * GAMMA_X_SPIN1_CO + 2];
-}
-
-__device__ void _store_neighbors_precision(cu_cmplx_PRECISION* dst, cu_cmplx_PRECISION const* src,
-                                          int const* neighbors) {
-
-  constexpr uint chunkSize = 6;
-  for (size_t i = 0; i < chunkSize / 2; i++) {
-    size_t consecutiveIdx = (i * blockDim.x) + threadIdx.x;
-    size_t chunkIdx = neighbors[(consecutiveIdx / chunkSize) * 4];
-
-    size_t valueIdx = consecutiveIdx % chunkSize;
-    dst[chunkIdx * chunkSize + valueIdx] = src[consecutiveIdx];
-  }
-}
-
-__global__ void cuda_prn_mvmh_componentwise_PRECISION(cu_cmplx_PRECISION* prp_buf,
-                                                      cu_cmplx_PRECISION const* D,
-                                                      cu_cmplx_PRECISION const* pbuf,
-                                                      int const* neighbors, LatticeAxis dim,
-                                                      size_t num_sites) {
-  // WARNING! Probably can only be launched with blockSize multiple of 2.
-  __shared__ cu_cmplx_PRECISION sharedPrpBuf[3 * diracCommonBlockSize];
-  auto localPrpBuf = sharedPrpBuf + 3 * threadIdx.x;
-  unsigned int neighbor_offset;
-  switch (dim) {
-    case LatticeAxis::T:
-      neighbor_offset = 0;
-      break;
-    case LatticeAxis::Z:
-      neighbor_offset = 1;
-      break;
-    case LatticeAxis::Y:
-      neighbor_offset = 2;
-      break;
-    case LatticeAxis::X:
-      neighbor_offset = 3;
-      break;
-  }
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  const size_t lattice_idx = idx / 2;
-
-  if (lattice_idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-
-  // first neighbor in block
-  // careful with the integer division here:  4 * (3 / 2) == 4 != 4 * 3 / 2 == 6
-  neighbors += 4 * ((blockDim.x * blockIdx.x) / 2) + neighbor_offset;
-  // We operate in steps of 3 here as the application of D happens as 3x3 matrix vector
-  // multiplications. There will be two mvms per lattice site.
-  if (idx % 2 == 1) {
-    // Even indices access elements 0..2
-    // Uneven indices access elements 3..5
-    pbuf += 3 * num_sites;
-  }
-  auto caD = ComponentAccess(D + lattice_idx, num_sites);
-
-  auto caPbuf = ComponentAccess(pbuf + lattice_idx, num_sites);
-  cuda_mvmh_componentwise_PRECISION(localPrpBuf, caD, caPbuf);
-  __syncthreads();
-  _store_neighbors_precision(prp_buf, sharedPrpBuf, neighbors);
-}
-
-__device__ void _load_neighbors_precision(cu_cmplx_PRECISION* dst, cu_cmplx_PRECISION const* src,
-                                          int const* neighbors) {
-  constexpr uint chunkSize = 6;
-  for (size_t i = 0; i < chunkSize / 2; i++) {
-    size_t consecutiveIdx = (i * blockDim.x) + threadIdx.x;
-    size_t chunkIdx = neighbors[(consecutiveIdx / chunkSize) * 4];
-    size_t valueIdx = consecutiveIdx % chunkSize;
-    dst[consecutiveIdx] = src[chunkIdx * chunkSize + valueIdx];
-  }
-}
-
-__global__ void cuda_pbp_su3_mvm_componentwise_PRECISION(cu_cmplx_PRECISION* pbuf,
-                                                         cu_cmplx_PRECISION const* D,
-                                                         cu_cmplx_PRECISION const* prn_buf,
-                                                         int const* neighbors, LatticeAxis dim,
-                                                         size_t num_sites) {
-  // WARNING! Probably can only be launched with blockSize multiple of 2.
-  __shared__ cu_cmplx_PRECISION sharedPrnBuf[3 * diracCommonBlockSize];
-  auto localPrnBuf = sharedPrnBuf + 3 * threadIdx.x;
-  unsigned int neighbor_offset;
-  switch (dim) {
-    case LatticeAxis::T:
-      neighbor_offset = 0;
-      break;
-    case LatticeAxis::Z:
-      neighbor_offset = 1;
-      break;
-    case LatticeAxis::Y:
-      neighbor_offset = 2;
-      break;
-    case LatticeAxis::X:
-      neighbor_offset = 3;
-      break;
-  }
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  const size_t lattice_idx = idx / 2;
-
-  if (lattice_idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-
-  // first neighbor in block
-  // careful with the integer division here:  4 * (3 / 2) == 4 != 4 * 3 / 2 == 6
-  neighbors += 4 * ((blockDim.x * blockIdx.x) / 2) + neighbor_offset;
-  _load_neighbors_precision(sharedPrnBuf, prn_buf, neighbors);
-  __syncthreads();
-  // We operate in steps of 3 here as the application of D happens as 3x3 matrix vector
-  // multiplications. There will be two mvms per lattice site.
-  auto caD = ComponentAccess(D + lattice_idx, num_sites);
-  auto caPbuf = ComponentAccess(pbuf + lattice_idx + (idx % 2 == 0 ? 0 : 3) * num_sites, num_sites);
-  cuda_mvm_componentwise_PRECISION(caPbuf, caD, localPrnBuf);
-}
-
-__global__ void cuda_pbp_su3_T_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites) {
+__global__ void cuda_hopping_gather_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
+                                                            cuda_hopping_args_PRECISION args,
+                                                            int const* neighbors, size_t start,
+                                                            size_t num_sites) {
   const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx >= num_sites) {
     // there is no more site for this index
     return;
   }
   auto caEta = ComponentAccess(eta + idx, num_sites);
-  auto caPbuf = ComponentAccess(pbuf + idx, num_sites);
-  caEta[0] -= caPbuf[0];
-  caEta[1] -= caPbuf[1];
-  caEta[2] -= caPbuf[2];
-  caEta[3] -= caPbuf[3];
-  caEta[4] -= caPbuf[4];
-  caEta[5] -= caPbuf[5];
-  caEta[6] += GAMMA_T_SPIN2_VAL * caPbuf[3 * GAMMA_T_SPIN2_CO];
-  caEta[7] += GAMMA_T_SPIN2_VAL * caPbuf[3 * GAMMA_T_SPIN2_CO + 1];
-  caEta[8] += GAMMA_T_SPIN2_VAL * caPbuf[3 * GAMMA_T_SPIN2_CO + 2];
-  caEta[9] += GAMMA_T_SPIN3_VAL * caPbuf[3 * GAMMA_T_SPIN3_CO];
-  caEta[10] += GAMMA_T_SPIN3_VAL * caPbuf[3 * GAMMA_T_SPIN3_CO + 1];
-  caEta[11] += GAMMA_T_SPIN3_VAL * caPbuf[3 * GAMMA_T_SPIN3_CO + 2];
-}
+  cu_cmplx_PRECISION e[12];
+#pragma unroll
+  for (int i = 0; i < 12; i++) e[i] = caEta[i];
 
-__global__ void cuda_pbp_su3_Z_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  auto caPbuf = ComponentAccess(pbuf + idx, num_sites);
-  caEta[0] -= caPbuf[0];
-  caEta[1] -= caPbuf[1];
-  caEta[2] -= caPbuf[2];
-  caEta[3] -= caPbuf[3];
-  caEta[4] -= caPbuf[4];
-  caEta[5] -= caPbuf[5];
-  caEta[6] += GAMMA_Z_SPIN2_VAL * caPbuf[3 * GAMMA_Z_SPIN2_CO];
-  caEta[7] += GAMMA_Z_SPIN2_VAL * caPbuf[3 * GAMMA_Z_SPIN2_CO + 1];
-  caEta[8] += GAMMA_Z_SPIN2_VAL * caPbuf[3 * GAMMA_Z_SPIN2_CO + 2];
-  caEta[9] += GAMMA_Z_SPIN3_VAL * caPbuf[3 * GAMMA_Z_SPIN3_CO];
-  caEta[10] += GAMMA_Z_SPIN3_VAL * caPbuf[3 * GAMMA_Z_SPIN3_CO + 1];
-  caEta[11] += GAMMA_Z_SPIN3_VAL * caPbuf[3 * GAMMA_Z_SPIN3_CO + 2];
-}
+  HOPPING_GATHER_DIR_PRECISION(T, 0);
+  HOPPING_GATHER_DIR_PRECISION(Z, 1);
+  HOPPING_GATHER_DIR_PRECISION(Y, 2);
+  HOPPING_GATHER_DIR_PRECISION(X, 3);
 
-__global__ void cuda_pbp_su3_Y_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  auto caPbuf = ComponentAccess(pbuf + idx, num_sites);
-  caEta[0] -= caPbuf[0];
-  caEta[1] -= caPbuf[1];
-  caEta[2] -= caPbuf[2];
-  caEta[3] -= caPbuf[3];
-  caEta[4] -= caPbuf[4];
-  caEta[5] -= caPbuf[5];
-  caEta[6] += GAMMA_Y_SPIN2_VAL * caPbuf[3 * GAMMA_Y_SPIN2_CO];
-  caEta[7] += GAMMA_Y_SPIN2_VAL * caPbuf[3 * GAMMA_Y_SPIN2_CO + 1];
-  caEta[8] += GAMMA_Y_SPIN2_VAL * caPbuf[3 * GAMMA_Y_SPIN2_CO + 2];
-  caEta[9] += GAMMA_Y_SPIN3_VAL * caPbuf[3 * GAMMA_Y_SPIN3_CO];
-  caEta[10] += GAMMA_Y_SPIN3_VAL * caPbuf[3 * GAMMA_Y_SPIN3_CO + 1];
-  caEta[11] += GAMMA_Y_SPIN3_VAL * caPbuf[3 * GAMMA_Y_SPIN3_CO + 2];
-}
-
-__global__ void cuda_pbp_su3_X_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* pbuf,
-                                                       size_t num_sites) {
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  auto caPbuf = ComponentAccess(pbuf + idx, num_sites);
-  caEta[0] -= caPbuf[0];
-  caEta[1] -= caPbuf[1];
-  caEta[2] -= caPbuf[2];
-  caEta[3] -= caPbuf[3];
-  caEta[4] -= caPbuf[4];
-  caEta[5] -= caPbuf[5];
-  caEta[6] += GAMMA_X_SPIN2_VAL * caPbuf[3 * GAMMA_X_SPIN2_CO];
-  caEta[7] += GAMMA_X_SPIN2_VAL * caPbuf[3 * GAMMA_X_SPIN2_CO + 1];
-  caEta[8] += GAMMA_X_SPIN2_VAL * caPbuf[3 * GAMMA_X_SPIN2_CO + 2];
-  caEta[9] += GAMMA_X_SPIN3_VAL * caPbuf[3 * GAMMA_X_SPIN3_CO];
-  caEta[10] += GAMMA_X_SPIN3_VAL * caPbuf[3 * GAMMA_X_SPIN3_CO + 1];
-  caEta[11] += GAMMA_X_SPIN3_VAL * caPbuf[3 * GAMMA_X_SPIN3_CO + 2];
-}
-
-__global__ void cuda_pbn_su3_T_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpT,
-                                                       size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpT[6 * diracCommonBlockSize];
-  auto localPrpT = sharedPrpT + 6 * threadIdx.x;
-  // advance prpT to first element of block
-  prpT += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(sharedPrpT, prpT, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  caEta[0] -= localPrpT[0];
-  caEta[1] -= localPrpT[1];
-  caEta[2] -= localPrpT[2];
-  caEta[3] -= localPrpT[3];
-  caEta[4] -= localPrpT[4];
-  caEta[5] -= localPrpT[5];
-  caEta[6] -= GAMMA_T_SPIN2_VAL * localPrpT[3 * GAMMA_T_SPIN2_CO];
-  caEta[7] -= GAMMA_T_SPIN2_VAL * localPrpT[3 * GAMMA_T_SPIN2_CO + 1];
-  caEta[8] -= GAMMA_T_SPIN2_VAL * localPrpT[3 * GAMMA_T_SPIN2_CO + 2];
-  caEta[9] -= GAMMA_T_SPIN3_VAL * localPrpT[3 * GAMMA_T_SPIN3_CO];
-  caEta[10] -= GAMMA_T_SPIN3_VAL * localPrpT[3 * GAMMA_T_SPIN3_CO + 1];
-  caEta[11] -= GAMMA_T_SPIN3_VAL * localPrpT[3 * GAMMA_T_SPIN3_CO + 2];
-}
-
-__global__ void cuda_pbn_su3_Z_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpZ,
-                                                       size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpZ[6 * diracCommonBlockSize];
-  auto localPrpZ = sharedPrpZ + 6 * threadIdx.x;
-  // advance prpZ to first element of block
-  prpZ += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(sharedPrpZ, prpZ, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  caEta[0] -= localPrpZ[0];
-  caEta[1] -= localPrpZ[1];
-  caEta[2] -= localPrpZ[2];
-  caEta[3] -= localPrpZ[3];
-  caEta[4] -= localPrpZ[4];
-  caEta[5] -= localPrpZ[5];
-  caEta[6] -= GAMMA_Z_SPIN2_VAL * localPrpZ[3 * GAMMA_Z_SPIN2_CO];
-  caEta[7] -= GAMMA_Z_SPIN2_VAL * localPrpZ[3 * GAMMA_Z_SPIN2_CO + 1];
-  caEta[8] -= GAMMA_Z_SPIN2_VAL * localPrpZ[3 * GAMMA_Z_SPIN2_CO + 2];
-  caEta[9] -= GAMMA_Z_SPIN3_VAL * localPrpZ[3 * GAMMA_Z_SPIN3_CO];
-  caEta[10] -= GAMMA_Z_SPIN3_VAL * localPrpZ[3 * GAMMA_Z_SPIN3_CO + 1];
-  caEta[11] -= GAMMA_Z_SPIN3_VAL * localPrpZ[3 * GAMMA_Z_SPIN3_CO + 2];
-}
-
-__global__ void cuda_pbn_su3_Y_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpY,
-                                                       size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpY[6 * diracCommonBlockSize];
-  auto localPrpY = sharedPrpY + 6 * threadIdx.x;
-  // advance prpY to first element of block
-  prpY += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(sharedPrpY, prpY, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  caEta[0] -= localPrpY[0];
-  caEta[1] -= localPrpY[1];
-  caEta[2] -= localPrpY[2];
-  caEta[3] -= localPrpY[3];
-  caEta[4] -= localPrpY[4];
-  caEta[5] -= localPrpY[5];
-  caEta[6] -= GAMMA_Y_SPIN2_VAL * localPrpY[3 * GAMMA_Y_SPIN2_CO];
-  caEta[7] -= GAMMA_Y_SPIN2_VAL * localPrpY[3 * GAMMA_Y_SPIN2_CO + 1];
-  caEta[8] -= GAMMA_Y_SPIN2_VAL * localPrpY[3 * GAMMA_Y_SPIN2_CO + 2];
-  caEta[9] -= GAMMA_Y_SPIN3_VAL * localPrpY[3 * GAMMA_Y_SPIN3_CO];
-  caEta[10] -= GAMMA_Y_SPIN3_VAL * localPrpY[3 * GAMMA_Y_SPIN3_CO + 1];
-  caEta[11] -= GAMMA_Y_SPIN3_VAL * localPrpY[3 * GAMMA_Y_SPIN3_CO + 2];
-}
-
-__global__ void cuda_pbn_su3_X_componentwise_PRECISION(cu_cmplx_PRECISION* eta,
-                                                       cu_cmplx_PRECISION const* prpX,
-                                                       size_t num_sites) {
-  __shared__ cu_cmplx_PRECISION sharedPrpX[6 * diracCommonBlockSize];
-  auto localPrpX = sharedPrpX + 6 * threadIdx.x;
-  // advance prpX to first element of block
-  prpX += 6 * blockDim.x * blockIdx.x;
-  copyChunksToConsecutiveAsBlock(sharedPrpX, prpX, 6, 0,
-                                 min(diracCommonBlockSize, num_sites - blockDim.x * blockIdx.x));
-  const size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
-  if (idx >= num_sites) {
-    // there is no more site for this index
-    return;
-  }
-  auto caEta = ComponentAccess(eta + idx, num_sites);
-  prpX += 6 * idx;
-  caEta[0] -= localPrpX[0];
-  caEta[1] -= localPrpX[1];
-  caEta[2] -= localPrpX[2];
-  caEta[3] -= localPrpX[3];
-  caEta[4] -= localPrpX[4];
-  caEta[5] -= localPrpX[5];
-  caEta[6] -= GAMMA_X_SPIN2_VAL * localPrpX[3 * GAMMA_X_SPIN2_CO];
-  caEta[7] -= GAMMA_X_SPIN2_VAL * localPrpX[3 * GAMMA_X_SPIN2_CO + 1];
-  caEta[8] -= GAMMA_X_SPIN2_VAL * localPrpX[3 * GAMMA_X_SPIN2_CO + 2];
-  caEta[9] -= GAMMA_X_SPIN3_VAL * localPrpX[3 * GAMMA_X_SPIN3_CO];
-  caEta[10] -= GAMMA_X_SPIN3_VAL * localPrpX[3 * GAMMA_X_SPIN3_CO + 1];
-  caEta[11] -= GAMMA_X_SPIN3_VAL * localPrpX[3 * GAMMA_X_SPIN3_CO + 2];
+#pragma unroll
+  for (int i = 0; i < 12; i++) caEta[i] = e[i];
 }
