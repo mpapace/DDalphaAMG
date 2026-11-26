@@ -4132,8 +4132,9 @@ void cuda_hopping_term_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISI
   int num_oe_sites = end-start;
   constexpr size_t blockSize = diracCommonBlockSize;
   uint gridSize = minGridSizeForN( num_oe_sites, blockSize );
-  // links in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
+  // links and prn/prp buffers in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
   const int half_ops = cuda_half_ops_PRECISION(op, l);
+  const int ghost_offset = half_ops ? CUDA_HOPPING_HALF_CHUNK : op->cuda_c.offset;
 
   // fused hopping term: one projection kernel over the source parity, ghost exchange of the
   // prn/prp buffers, one gather kernel over the target parity
@@ -4155,23 +4156,23 @@ void cuda_hopping_term_PRECISION( cuda_vector_PRECISION eta, cuda_vector_PRECISI
   }
   cuda_safe_call(cudaDeviceSynchronize());
 
-  cuda_ghost_sendrecv_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), plus_dir_param, l);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
 
-  cuda_ghost_wait_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), minus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), plus_dir_param, l);
-  cuda_ghost_wait_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), plus_dir_param, l);
+  cuda_ghost_wait_offset_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), minus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), plus_dir_param, l, ghost_offset);
   cuda_safe_call(cudaDeviceSynchronize());
 
   if ( amount == _EVEN_SITES ) {

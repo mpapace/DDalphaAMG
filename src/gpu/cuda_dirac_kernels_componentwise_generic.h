@@ -86,7 +86,13 @@ __global__ void cuda_site_diag_ee_componentwise_half_PRECISION(cuda_vector_PRECI
 __global__ void cuda_site_diag_oo_inv_componentwise_half_PRECISION(cuda_vector_PRECISION eta,
     cu_cmplx_PRECISION const* phi, __half2 const* clover, float scale, size_t num_sites);
 
-// The two hopping kernels with the links read from args.Dh (half precision, one scale per direction).
+#ifndef CUDA_HOPPING_HALF_CHUNK
+#define CUDA_HOPPING_HALF_CHUNK 4  // cu_cmplx_float per site in a half-precision prn/prp buffer
+#endif
+// The two hopping kernels in half precision: links read from args.Dh (one scale per direction),
+// prn/prp buffers in half precision, 32 bytes per site and direction, i.e. 4 cu_cmplx_float per
+// site instead of 6 (layout in the .cu file), exchanged with cuda_ghost_sendrecv/wait_offset
+// and offset CUDA_HOPPING_HALF_CHUNK.
 __global__ void cuda_hopping_project_componentwise_half_PRECISION(cuda_hopping_args_PRECISION args,
                                                                   cu_cmplx_PRECISION const* phi,
                                                                   int const* neighbors, size_t start,

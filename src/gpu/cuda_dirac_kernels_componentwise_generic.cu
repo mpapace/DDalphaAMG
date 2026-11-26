@@ -228,6 +228,51 @@ __device__ inline void hopping_store6_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_
   }
 }
 
+// Half-precision chunk of a prn/prp buffer: the 6 complex numbers of a site as 6 __half2
+// (24 bytes) scaled by the largest |re|, |im| of the chunk, followed by that scale as a float and
+// 4 unused bytes: 32 bytes = 4 cu_cmplx_float per site (instead of 6), i.e. one aligned sector.
+// Stored with two 16-byte stores, read with two 16-byte loads.
+__device__ inline void hopping_store_chunk_half_PRECISION(cu_cmplx_PRECISION* p, cu_cmplx_PRECISION const* v) {
+  float m = 0.0f;
+#pragma unroll
+  for (int k = 0; k < 6; k++) m = fmaxf(m, fmaxf(fabsf((float) v[k].x), fabsf((float) v[k].y)));
+  const float inv = m > 0.0f ? 1.0f / m : 0.0f;
+  unsigned int w[6];
+#pragma unroll
+  for (int k = 0; k < 6; k++) {
+    __half2 h = __floats2half2_rn((float) v[k].x * inv, (float) v[k].y * inv);
+    w[k] = *reinterpret_cast<unsigned int*>(&h);
+  }
+  uint4* q = reinterpret_cast<uint4*>(p);
+  q[0] = make_uint4(w[0], w[1], w[2], w[3]);
+  q[1] = make_uint4(w[4], w[5], __float_as_uint(m), 0u);
+}
+
+__device__ inline void hopping_load_chunk_half_PRECISION(cu_cmplx_PRECISION* v, cu_cmplx_PRECISION const* p) {
+  uint4 const* q = reinterpret_cast<uint4 const*>(p);
+  const uint4 a = q[0], b = q[1];
+  const unsigned int w[6] = {a.x, a.y, a.z, a.w, b.x, b.y};
+  const float m = __uint_as_float(b.z);
+#pragma unroll
+  for (int k = 0; k < 6; k++) {
+    const float2 f = __half22float2(*reinterpret_cast<__half2 const*>(&w[k]));
+    v[k].x = m * f.x;
+    v[k].y = m * f.y;
+  }
+}
+
+// chunk of site s of a prn/prp buffer, in float (6 per site) or half precision (HALF, 4 per site)
+template <bool HALF>
+__device__ inline void hopping_store_chunk_PRECISION(cu_cmplx_PRECISION* buf, size_t s, cu_cmplx_PRECISION const* v) {
+  if constexpr (HALF) hopping_store_chunk_half_PRECISION(buf + CUDA_HOPPING_HALF_CHUNK * s, v);
+  else hopping_store6_PRECISION(buf + 6 * s, v);
+}
+template <bool HALF>
+__device__ inline void hopping_load_chunk_PRECISION(cu_cmplx_PRECISION* v, cu_cmplx_PRECISION const* buf, size_t s) {
+  if constexpr (HALF) hopping_load_chunk_half_PRECISION(v, buf + CUDA_HOPPING_HALF_CHUNK * s);
+  else hopping_load6_PRECISION(v, buf + 6 * s);
+}
+
 // the 9 entries of U_mu at site idx, from the float (HALF = false) or half-precision links;
 // pointers passed by value (taking the address of the kernel parameter struct would copy it to
 // local memory)
@@ -256,7 +301,7 @@ __device__ inline void hopping_load_links_PRECISION(cu_cmplx_PRECISION* U, cu_cm
       pp[c]     = x[c]     + GAMMA_##DIR##_SPIN0_VAL * x[3 * GAMMA_##DIR##_SPIN0_CO + c];         \
       pp[3 + c] = x[3 + c] + GAMMA_##DIR##_SPIN1_VAL * x[3 * GAMMA_##DIR##_SPIN1_CO + c];         \
     }                                                                                            \
-    hopping_store6_PRECISION(args.prn[mu] + 6 * (start + idx), pm);                              \
+    hopping_store_chunk_PRECISION<HALF>(args.prn[mu], start + idx, pm);                          \
     hopping_load_links_PRECISION<HALF>(U, args.D[mu], args.Dh[mu], args.Dh_scale[mu], idx, num_sites);\
     /* r = U^H pp, for both spin halves */                                                       \
     _Pragma("unroll")                                                                            \
@@ -268,7 +313,7 @@ __device__ inline void hopping_load_links_PRECISION(cu_cmplx_PRECISION* U, cu_cm
         r[3 * h + i] += cu_conj_PRECISION(U[6 + i]) * pp[3 * h + 2];                             \
       }                                                                                          \
     }                                                                                            \
-    hopping_store6_PRECISION(args.prp[mu] + 6 * (size_t) neighbors[4 * idx + mu], r);           \
+    hopping_store_chunk_PRECISION<HALF>(args.prp[mu], (size_t) neighbors[4 * idx + mu], r);     \
   } while (0)
 
 template <bool HALF>
@@ -296,7 +341,7 @@ __device__ __forceinline__ void cuda_hopping_project_componentwise_body_PRECISIO
 #define HOPPING_GATHER_DIR_PRECISION( DIR, mu ) do {                                             \
     cu_cmplx_PRECISION g[6], u[6], U[9];                                                        \
     /* forward hop: u = U_mu (1 - gamma_mu) phi(x + mu), lifted as in pbp_su3 */                 \
-    hopping_load6_PRECISION(g, args.prn[mu] + 6 * (size_t) neighbors[4 * idx + mu]);            \
+    hopping_load_chunk_PRECISION<HALF>(g, args.prn[mu], (size_t) neighbors[4 * idx + mu]);      \
     hopping_load_links_PRECISION<HALF>(U, args.D[mu], args.Dh[mu], args.Dh_scale[mu], idx, num_sites);\
     _Pragma("unroll")                                                                            \
     for (int h = 0; h < 2; h++) {                                                                \
@@ -315,7 +360,7 @@ __device__ __forceinline__ void cuda_hopping_project_componentwise_body_PRECISIO
       e[9 + c] += GAMMA_##DIR##_SPIN3_VAL * u[3 * GAMMA_##DIR##_SPIN3_CO + c];                   \
     }                                                                                            \
     /* backward hop: U_mu^H (1 + gamma_mu) phi(x - mu), already in prp at this site (pbn_su3) */ \
-    hopping_load6_PRECISION(g, args.prp[mu] + 6 * (start + idx));                                \
+    hopping_load_chunk_PRECISION<HALF>(g, args.prp[mu], start + idx);                            \
     _Pragma("unroll")                                                                            \
     for (int c = 0; c < 3; c++) {                                                                \
       e[c] -= g[c];                                                                              \

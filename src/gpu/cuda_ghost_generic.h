@@ -11,6 +11,13 @@ void cuda_ghost_sendrecv_PRECISION(cuda_vector_PRECISION phi, int mu, int dir,
                                    cuda_comm_PRECISION_struct *c, int amount, level_struct *l);
 void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, int mu, int dir,
                                cuda_comm_PRECISION_struct *c, int amount, level_struct *l);
+// same with an explicit number of cu_cmplx_PRECISION per site (instead of c->offset)
+void cuda_ghost_sendrecv_offset_PRECISION(cuda_vector_PRECISION phi, int mu, int dir,
+                                          cuda_comm_PRECISION_struct *c, int amount, level_struct *l,
+                                          int offset);
+void cuda_ghost_wait_offset_PRECISION(cuda_vector_PRECISION phi, int mu, int dir,
+                                      cuda_comm_PRECISION_struct *c, int amount, level_struct *l,
+                                      int offset);
 
 // cuda_schwarz_generic.c is a C file an needs C-compatible linking.
 #ifdef __cplusplus

@@ -273,8 +273,9 @@ void cuda_d_plus_clover_PRECISION(
 
   constexpr size_t blockSize = diracCommonBlockSize;
   const size_t gridSize = minGridSizeForN(l->num_inner_lattice_sites, blockSize);
-  // links in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
+  // links and prn/prp buffers in half precision (solve phase, -DCUDA_HALF_OPERATORS)?
   const int half_ops = cuda_half_ops_PRECISION(op, l);
+  const int ghost_offset = half_ops ? CUDA_HOPPING_HALF_CHUNK : op->cuda_c.offset;
 
   const auto pbs = projection_buffer_size(l->num_lattice_site_var, l->num_lattice_sites);
   auto shift = to_cuda_cmplx_PRECISION(op->shift);
@@ -310,23 +311,23 @@ void cuda_d_plus_clover_PRECISION(
   }
   cuda_safe_call(cudaDeviceSynchronize());
 
-  cuda_ghost_sendrecv_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_sendrecv_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), _FULL_SYSTEM, l);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_sendrecv_offset_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
 
-  cuda_ghost_wait_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), _FULL_SYSTEM, l);
-  cuda_ghost_wait_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), _FULL_SYSTEM, l);
+  cuda_ghost_wait_offset_PRECISION(op->prnT_gpu, T, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnZ_gpu, Z, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnY_gpu, Y, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prnX_gpu, X, -1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpT_gpu, T, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpZ_gpu, Z, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpY_gpu, Y, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
+  cuda_ghost_wait_offset_PRECISION(op->prpX_gpu, X, +1, &(op->cuda_c), _FULL_SYSTEM, l, ghost_offset);
   cuda_safe_call(cudaDeviceSynchronize());
 
   if ( half_ops ) {

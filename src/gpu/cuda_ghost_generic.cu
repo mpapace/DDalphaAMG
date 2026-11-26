@@ -119,13 +119,17 @@ void cuda_ghost_sendrecv_init_PRECISION(const int type, cuda_comm_PRECISION_stru
   }
 }
 
-void cuda_ghost_sendrecv_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
-                                   cuda_comm_PRECISION_struct *c, const int amount,
-                                   level_struct *l) {
+// offset: number of cu_cmplx_PRECISION per site in phi (c->offset for the usual buffers; e.g. 4 for
+// the half-precision prn/prp chunks of the fused hopping term). All positions in phi (c->comm_start)
+// are multiples of c->offset sites and are rescaled to the given offset.
+void cuda_ghost_sendrecv_offset_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
+                                          cuda_comm_PRECISION_struct *c, const int amount,
+                                          level_struct *l, const int offset) {
   // does not allow sending in both directions at the same time
   if (l->global_splitting[mu] > 1) {
-    int *table = NULL, mu_dir = 2 * mu - MIN(dir, 0), offset = c->offset, length[2] = {0, 0},
+    int *table = NULL, mu_dir = 2 * mu - MIN(dir, 0), length[2] = {0, 0},
         comm_start = 0, table_start = 0;
+    const int comm_start_mu_dir = ( c->comm_start[mu_dir] / c->offset ) * offset;
 #ifdef GPU2GPU_COMMS_VIA_CPUS
     cuda_vector_PRECISION phi_pt;
 #else
@@ -135,17 +139,17 @@ void cuda_ghost_sendrecv_PRECISION(cuda_vector_PRECISION phi, const int mu, cons
     if (amount == _FULL_SYSTEM) {
       length[0] = (c->num_boundary_sites[2 * mu]) * offset;
       length[1] = (c->num_boundary_sites[2 * mu + 1]) * offset;
-      comm_start = c->comm_start[mu_dir];
+      comm_start = comm_start_mu_dir;
       table_start = 0;
     } else if (amount == _EVEN_SITES) {
       length[0] = c->num_even_boundary_sites[2 * mu] * offset;
       length[1] = c->num_even_boundary_sites[2 * mu + 1] * offset;
-      comm_start = c->comm_start[mu_dir];
+      comm_start = comm_start_mu_dir;
       table_start = 0;
     } else if (amount == _ODD_SITES) {
       length[0] = c->num_odd_boundary_sites[2 * mu] * offset;
       length[1] = c->num_odd_boundary_sites[2 * mu + 1] * offset;
-      comm_start = c->comm_start[mu_dir] + c->num_even_boundary_sites[mu_dir] * offset;
+      comm_start = comm_start_mu_dir + c->num_even_boundary_sites[mu_dir] * offset;
       table_start = c->num_even_boundary_sites[mu_dir];
     }
 
@@ -246,11 +250,14 @@ void cuda_ghost_sendrecv_PRECISION(cuda_vector_PRECISION phi, const int mu, cons
   }
 }
 
-void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
-                               cuda_comm_PRECISION_struct *c, const int amount, level_struct *l) {
+void cuda_ghost_wait_offset_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
+                                      cuda_comm_PRECISION_struct *c, const int amount, level_struct *l,
+                                      const int offset) {
   if (l->global_splitting[mu] > 1) {
     int mu_dir = 2 * mu - MIN(dir, 0);
-    int *table, offset = c->offset, length[2] = {0, 0}, table_start = 0;
+    int *table, length[2] = {0, 0}, table_start = 0;
+    const int comm_start_mu_dir = ( c->comm_start[mu_dir] / c->offset ) * offset;
+    (void) comm_start_mu_dir;  // only used with GPU2GPU_COMMS_VIA_CPUS
 #ifdef GPU2GPU_COMMS_VIA_CPUS
     //cuda_vector_PRECISION buffer;
 #else
@@ -276,11 +283,11 @@ void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, const int mu, const in
     cuda_vector_PRECISION phi_pt;
 
     if (amount == _FULL_SYSTEM) {
-      comm_start = c->comm_start[mu_dir];
+      comm_start = comm_start_mu_dir;
     } else if (amount == _EVEN_SITES) {
-      comm_start = c->comm_start[mu_dir];
+      comm_start = comm_start_mu_dir;
     } else if (amount == _ODD_SITES) {
-      comm_start = c->comm_start[mu_dir] + c->num_even_boundary_sites[mu_dir] * offset;
+      comm_start = comm_start_mu_dir + c->num_even_boundary_sites[mu_dir] * offset;
     }
 
     phi_pt = phi + comm_start;
@@ -342,6 +349,16 @@ void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, const int mu, const in
 
     c->in_use[mu_dir] = 0;
   }
+}
+
+void cuda_ghost_sendrecv_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
+                                   cuda_comm_PRECISION_struct *c, const int amount, level_struct *l) {
+  cuda_ghost_sendrecv_offset_PRECISION(phi, mu, dir, c, amount, l, c->offset);
+}
+
+void cuda_ghost_wait_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
+                               cuda_comm_PRECISION_struct *c, const int amount, level_struct *l) {
+  cuda_ghost_wait_offset_PRECISION(phi, mu, dir, c, amount, l, c->offset);
 }
 
 extern "C" void cuda_ghost_update_PRECISION(cuda_vector_PRECISION phi, const int mu, const int dir,
