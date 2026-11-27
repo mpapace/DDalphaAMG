@@ -145,6 +145,11 @@ extern "C" int cuda_coarse_oddeven_on_gpu_PRECISION( level_struct *l ) {
 extern "C" void cuda_coarse_operator_PRECISION_alloc( operator_PRECISION_struct *op, level_struct *l ) {
 #ifdef VECTORIZE_COARSE_OPERATOR_PRECISION
   if ( l->depth == 0 || l->level == 0 ) return;
+#ifdef RICHARDSON_SMOOTHER
+  // with the Richardson smoother the coarse levels stay on the CPU: their GPU code has only the
+  // GMRES smoother, while the CPU code uses Richardson at all depths (use_richardson, vcycle)
+  return;
+#endif
 
   int n = l->num_inner_lattice_sites, lda = cuda_coarse_oddeven_lda_PRECISION( l );
   size_t offset_v = (size_t)2*l->num_lattice_site_var*lda;
