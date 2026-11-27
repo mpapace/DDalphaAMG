@@ -22,6 +22,9 @@
 #include "main.h"
 #include "profiling.h"
 #include "proxies/data_layout_proxy_PRECISION.h"
+#ifdef RICHARDSON_SMOOTHER
+#include "proxies/linsolve_proxy_PRECISION.h"
+#endif
 
 #ifdef CUDA_OPT
 static void coarse_oddeven_gpu_test_PRECISION( level_struct *l );
@@ -1252,7 +1255,7 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
 //#ifdef BLOCK_JACOBI
 #if 0
   // if Block Jacobi is enabled, solve the problem : M^{-1}Ax = M^{-1}b
-  if ( p->block_jacobi_PRECISION.BJ_usable == 1 ) {
+  if ( l->level==0 && p->block_jacobi_PRECISION.BJ_usable == 1 ) {
     // create a backup of b
     vector_PRECISION_copy( p->block_jacobi_PRECISION.b_backup, p->b, start, end, l );
     block_jacobi_apply_PRECISION( p->b, p->block_jacobi_PRECISION.b_backup, p, l, threading );
@@ -1269,35 +1272,54 @@ void coarse_solve_odd_even_PRECISION( gmres_PRECISION_struct *p, operator_PRECIS
 #ifdef POLYPREC
   // TODO : there should be some sort of check after calling re_construct_lejas_PRECISION(...)
   //        to make sure that we can do the following function pointer assignment
-  START_MASTER(threading)
-  if ( l->level == 0 ) {
+  if ( l->level==0 ) {
+    START_MASTER(threading)
     p->preconditioner = p->polyprec_PRECISION.preconditioner;
-  }
-  END_MASTER(threading)
+    END_MASTER(threading)
 
-  SYNC_MASTER_TO_ALL(threading)
+    SYNC_MASTER_TO_ALL(threading)
+  }
 #endif
 
+  if ( l->level==0 ) {
 #ifdef GCRODR
-  if ( l->level == 0 ) {
     fgmres_iters = flgcrodr_PRECISION( p, l, threading );
-  } else {
-    fgmres_iters = fgmres_PRECISION( p, l, threading );
-  }
 #else
-  fgmres_iters = fgmres_PRECISION( p, l, threading );
+    fgmres_iters = fgmres_PRECISION( p, l, threading );
 #endif
+  } else {
+    if ( g.method == 4 ) {
+#if defined(GCR_SMOOTHER) || defined(RICHARDSON_SMOOTHER)
+      // restricting GCR and Richardson to be used as smoothers at the finest level only
+#ifdef GCR_SMOOTHER
+      if ( p->use_gcr == 1 ) {
+        fgcr_PRECISION( p, l, threading );
+#else
+      if ( p->use_richardson == 1 ) {
+        richardson_PRECISION( p, l, threading );
+#endif
+      }
+      else {
+        fgmres_PRECISION( p, l, threading );
+      }
+#else
+      fgmres_PRECISION( p, l, threading );
+#endif
+    } else if ( g.method == 5 ) {
+      bicgstab_PRECISION( p, l, threading );
+    }
+  }
 
-  START_MASTER(threading)
-  if ( l->level == 0 ) {
+  if ( l->level==0 ) {
+    START_MASTER(threading)
     g.avg_b1 += fgmres_iters;
     g.avg_b2 += 1;
     g.avg_crst = g.avg_b1/g.avg_b2;
-  }
-  END_MASTER(threading)
+    END_MASTER(threading)
 
-  SYNC_MASTER_TO_ALL(threading)
-  SYNC_CORES(threading)
+    SYNC_MASTER_TO_ALL(threading)
+    SYNC_CORES(threading)
+  }
 
 //#ifdef BLOCK_JACOBI
 #if 0

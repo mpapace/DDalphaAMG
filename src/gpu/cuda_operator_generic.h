@@ -10,7 +10,6 @@ extern "C" {
 void cuda_operator_PRECISION_init(operator_PRECISION_struct *op);
 void cuda_operator_PRECISION_alloc(operator_PRECISION_struct *op, const int type, level_struct *l);
 void cuda_operator_PRECISION_free(operator_PRECISION_struct *op, const int type, level_struct *l);
-void cuda_operator_PRECISION_upload_D_clover(operator_PRECISION_struct *op, level_struct *l);
 
 #ifdef __cplusplus
 }

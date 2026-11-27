@@ -16,15 +16,6 @@
   void cuda_interpolate_PRECISION_vectorwrapper( vector_PRECISION phi, vector_PRECISION phi_c, level_struct *l, struct Thread *threading );
   void cuda_interpolate3_PRECISION_vectorwrapper( vector_PRECISION phi, vector_PRECISION phi_c, level_struct *l, struct Thread *threading );
 
-  // depth-0 smoother on the GPU (called by vcycle_PRECISION)
-  int  cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISION phi, vector_PRECISION eta,
-                                     operator_PRECISION_struct *op, level_struct *l, struct Thread *threading,
-                                     int keep_on_gpu );
-  void cuda_smoother_oe_prepare_PRECISION( vector_PRECISION b, level_struct *l, struct Thread *threading );
-  void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_PRECISION x, level_struct *l,
-                                          struct Thread *threading );
-  int  cuda_smoother_oe_gmres_PRECISION( vector_PRECISION phi, gmres_PRECISION_struct *p, level_struct *l,
-                                         struct Thread *threading );
 #ifdef CUDA_INTERP_BENCHMARK
   // times of the GPU parts of one call (see proxies/interpolation_proxy_generic.c)
   void cuda_interpolation_PRECISION_bench( level_struct *l, int op, int reps, double *t );

@@ -3,10 +3,6 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include <cublas_v2.h>
-#include <complex>
-#include <vector>
-#include <algorithm>
 
 extern "C"{
 
@@ -14,10 +10,7 @@ extern "C"{
   #include "main.h"
   #undef IMPORT_FROM_EXTERN_C
 
-  #include "operator.h"
 }
-
-#include "cuda_componentwise.h"
 
 #ifdef CUDA_OPT
 
@@ -484,19 +477,13 @@ extern "C" void cuda_interpolation_PRECISION_alloc( level_struct *l ) {
   l->is_PRECISION.eta_gpu   = NULL;
   l->is_PRECISION.phi_gpu_host = NULL;
   l->is_PRECISION.eta_gpu_host = NULL;
-  l->is_PRECISION.oe_b_gpu     = NULL;
-  l->is_PRECISION.oe_x_gpu     = NULL;
-  l->is_PRECISION.oe_chunk_gpu = NULL;
   l->is_PRECISION.oe_perm_gpu  = NULL;
-  l->is_PRECISION.oe_V_gpu     = NULL;
-  l->is_PRECISION.oe_h_gpu     = NULL;
-  l->is_PRECISION.oe_V_cols    = 0;
-  l->is_PRECISION.defer_phi_dtoh = 0;
-  l->is_PRECISION.phi_stale_host = NULL;
-  l->is_PRECISION.eta_resident_host = NULL;
-  l->is_PRECISION.eta_stale_host    = NULL;
-  l->is_PRECISION.keep_phi_result   = 0;
-  l->is_PRECISION.phi_result_host   = NULL;
+  l->is_PRECISION.eta_preloaded_host = NULL;
+  l->is_PRECISION.eta_host_stale     = NULL;
+  l->is_PRECISION.keep_phi_on_gpu    = 0;
+  l->is_PRECISION.phi_result_host    = NULL;
+  l->is_PRECISION.defer_phi_copy     = 0;
+  l->is_PRECISION.phi_host_stale     = NULL;
 }
 
 
@@ -514,6 +501,11 @@ extern "C" void cuda_interpolation_PRECISION_op_to_gpu( level_struct *l ) {
     cuda_safe_call( cudaMalloc( (void**)&(l->is_PRECISION.phi_c_gpu), n_coarse*sizeof(cu_cmplx_PRECISION) ) );
     cuda_safe_call( cudaMalloc( (void**)&(l->is_PRECISION.eta_gpu),   n_fine*sizeof(cu_cmplx_PRECISION) ) );
   }
+  // the operator has changed: no vector on the GPU belongs to the current hierarchy any more
+  l->is_PRECISION.phi_gpu_host = NULL;
+  l->is_PRECISION.eta_gpu_host = NULL;
+  l->is_PRECISION.eta_preloaded_host = NULL;
+  l->is_PRECISION.eta_host_stale     = NULL;
 
   cuda_safe_call( cudaMemcpy( l->is_PRECISION.op_gpu, l->is_PRECISION.op,
                               op_size*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
@@ -527,32 +519,23 @@ extern "C" void cuda_interpolation_PRECISION_free( level_struct *l ) {
     cuda_safe_call( cudaFree( l->is_PRECISION.phi_gpu ) );
     cuda_safe_call( cudaFree( l->is_PRECISION.phi_c_gpu ) );
     cuda_safe_call( cudaFree( l->is_PRECISION.eta_gpu ) );
-    if ( l->is_PRECISION.oe_b_gpu != NULL ) {
-      cuda_safe_call( cudaFree( l->is_PRECISION.oe_b_gpu ) );
-      cuda_safe_call( cudaFree( l->is_PRECISION.oe_x_gpu ) );
-      cuda_safe_call( cudaFree( l->is_PRECISION.oe_chunk_gpu ) );
-      cuda_safe_call( cudaFree( l->is_PRECISION.oe_perm_gpu ) );
-      if ( l->is_PRECISION.oe_V_gpu != NULL ) {
-        cuda_safe_call( cudaFree( l->is_PRECISION.oe_V_gpu ) );
-        cuda_safe_call( cudaFree( l->is_PRECISION.oe_h_gpu ) );
-        l->is_PRECISION.oe_V_gpu = NULL; l->is_PRECISION.oe_h_gpu = NULL; l->is_PRECISION.oe_V_cols = 0;
-      }
-      l->is_PRECISION.oe_b_gpu = NULL; l->is_PRECISION.oe_x_gpu = NULL;
-      l->is_PRECISION.oe_chunk_gpu = NULL; l->is_PRECISION.oe_perm_gpu = NULL;
-    }
     l->is_PRECISION.op_gpu    = NULL;
     l->is_PRECISION.phi_gpu   = NULL;
     l->is_PRECISION.phi_c_gpu = NULL;
     l->is_PRECISION.eta_gpu   = NULL;
   }
+  if ( l->is_PRECISION.oe_perm_gpu != NULL ) {
+    cuda_safe_call( cudaFree( l->is_PRECISION.oe_perm_gpu ) );
+    l->is_PRECISION.oe_perm_gpu = NULL;
+  }
   l->is_PRECISION.phi_gpu_host = NULL;
   l->is_PRECISION.eta_gpu_host = NULL;
-  l->is_PRECISION.defer_phi_dtoh = 0;
-  l->is_PRECISION.phi_stale_host = NULL;
-  l->is_PRECISION.eta_resident_host = NULL;
-  l->is_PRECISION.eta_stale_host = NULL;
-  l->is_PRECISION.keep_phi_result = 0;
-  l->is_PRECISION.phi_result_host = NULL;
+  l->is_PRECISION.eta_preloaded_host = NULL;
+  l->is_PRECISION.eta_host_stale     = NULL;
+  l->is_PRECISION.keep_phi_on_gpu    = 0;
+  l->is_PRECISION.phi_result_host    = NULL;
+  l->is_PRECISION.defer_phi_copy     = 0;
+  l->is_PRECISION.phi_host_stale     = NULL;
 }
 
 
@@ -574,9 +557,8 @@ extern "C" void cuda_interpolate_PRECISION( cuda_vector_PRECISION phi_gpu, cuda_
 
 
 // GPU version of restrict_PRECISION for host vectors (called by restrict_PRECISION in
-// proxies/interpolation_proxy_generic.c): copy of phi to the GPU (unless it is already there,
-// see eta_resident_host), cuda_restrict_PRECISION, copy of the result to the host, gather to the
-// coarse-level processes (MPI, on the CPU)
+// proxies/interpolation_proxy_generic.c): copy of phi to the GPU, cuda_restrict_PRECISION,
+// copy of the result to the host, gather to the coarse-level processes (MPI, on the CPU)
 extern "C" void cuda_restrict_PRECISION_vectorwrapper( vector_PRECISION phi_c, vector_PRECISION phi, level_struct *l,
                                                        struct Thread *threading ) {
 
@@ -595,18 +577,20 @@ extern "C" void cuda_restrict_PRECISION_vectorwrapper( vector_PRECISION phi_c, v
     MPI_Abort( MPI_COMM_WORLD, 1 );
   }
 
-  if ( l->is_PRECISION.eta_resident_host == phi ) {
-    // eta was written into eta_gpu by the outer FGMRES on the GPU: no copy, the host copy is stale
-    l->is_PRECISION.eta_stale_host = phi;
+  // the input stays in eta_gpu for the depth-0 smoother (see cuda_solve_oddeven_PRECISION_resident)
+  if ( l->is_PRECISION.eta_preloaded_host == phi ) {
+    // already written into eta_gpu by the outer FGMRES on the GPU: no copy, the host vector is stale
+    l->is_PRECISION.eta_host_stale = phi;
   } else {
     cuda_safe_call( cudaMemcpy( l->is_PRECISION.eta_gpu, phi, n_fine*sizeof(cu_cmplx_PRECISION),
                                 cudaMemcpyHostToDevice ) );
-    l->is_PRECISION.eta_stale_host = NULL;
+    l->is_PRECISION.eta_host_stale = NULL;
   }
-  l->is_PRECISION.eta_resident_host = NULL;
-  l->is_PRECISION.eta_gpu_host = phi;   // kept on the GPU for the smoother residual
+  l->is_PRECISION.eta_preloaded_host = NULL;
 
   cuda_restrict_PRECISION( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.eta_gpu, l );
+  l->is_PRECISION.eta_gpu_host = phi;
+  l->is_PRECISION.phi_gpu_host = NULL;   // the interpolation of this cycle comes after
 
   // synchronous copy on the default stream: waits for the kernel to finish
   cuda_safe_call( cudaMemcpy( l->next_level->gs_PRECISION.transfer_buffer, l->is_PRECISION.phi_c_gpu,
@@ -630,8 +614,7 @@ extern "C" void cuda_restrict_PRECISION_vectorwrapper( vector_PRECISION phi_c, v
 
 // GPU version of interpolate_PRECISION (add = 1, phi += P phi_c) and interpolate3_PRECISION
 // (add = 0, phi = P phi_c) for host vectors: distribution from the coarse-level processes (MPI, on
-// the CPU), copies to the GPU, cuda_interpolate_PRECISION, copy of the result to the host (or
-// deferred, see defer_phi_dtoh)
+// the CPU), copies to the GPU, cuda_interpolate_PRECISION, copy of the result to the host
 static void cuda_interpolate_PRECISION_host( vector_PRECISION phi, vector_PRECISION phi_c, level_struct *l,
                                              struct Thread *threading, int add ) {
 
@@ -676,21 +659,25 @@ static void cuda_interpolate_PRECISION_host( vector_PRECISION phi, vector_PRECIS
 
   cuda_interpolate_PRECISION( l->is_PRECISION.phi_gpu, l->is_PRECISION.phi_c_gpu, l, add );
 
+  // the outer FGMRES on the GPU asks for phi = P phi_c only on the GPU (defer_phi_copy): the depth-0
+  // smoother on the GPU takes it from phi_gpu, and cuda_smoother_resident_PRECISION_check copies it
+  // to the host if the smoother runs on the host vectors
+  int skip_copy = ( l->is_PRECISION.defer_phi_copy && !add );
 #ifdef CUDA_INTERP_TEST
-  l->is_PRECISION.defer_phi_dtoh = 0;   // the test compares on the host
+  if ( do_test ) skip_copy = 0;   // the test compares the host result
 #endif
-  if ( l->is_PRECISION.defer_phi_dtoh ) {
-    // the depth-0 smoother continues from phi_gpu and copies phi to the host at its end
+  l->is_PRECISION.defer_phi_copy = 0;
+  if ( skip_copy ) {
     cuda_safe_call( cudaDeviceSynchronize() );
-    l->is_PRECISION.phi_stale_host = phi;
+    l->is_PRECISION.phi_host_stale = phi;
   } else {
     // synchronous copy on the default stream: waits for the kernel to finish
     cuda_safe_call( cudaMemcpy( phi, l->is_PRECISION.phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION),
                                 cudaMemcpyDeviceToHost ) );
-    l->is_PRECISION.phi_stale_host = NULL;
+    l->is_PRECISION.phi_host_stale = NULL;
   }
-  l->is_PRECISION.defer_phi_dtoh = 0;
-  l->is_PRECISION.phi_gpu_host = phi;   // kept on the GPU for the smoother residual
+  // the result stays in phi_gpu for the depth-0 smoother (see cuda_solve_oddeven_PRECISION_resident)
+  l->is_PRECISION.phi_gpu_host = phi;
 
 #ifdef CUDA_INTERP_TEST
   if ( do_test ) {
@@ -717,512 +704,6 @@ extern "C" void cuda_interpolate3_PRECISION_vectorwrapper( vector_PRECISION phi,
 }
 
 
-__global__ void cuda_fine_residual_PRECISION_kernel( cu_cmplx_PRECISION *r, const cu_cmplx_PRECISION *eta,
-                                                     const cu_cmplx_PRECISION *dphi, size_t n ) {
-  size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
-  if ( i < n )
-    r[i] = make_cu_cmplx_PRECISION( eta[i].x - dphi[i].x, eta[i].y - dphi[i].y );
-}
-
-
-// Depth-0 smoother residual r = eta - D phi on the GPU, using the copies of phi (left on the GPU
-// by the interpolation) and of eta (left by the restriction) if they still belong to these host
-// vectors. Returns 1 if the residual was computed here (r is then on the host, or in op->x_gpu
-// if keep_on_gpu), 0 if the caller
-// has to compute it. Called by all threads; the tags are consumed in both cases.
-// r = eta - D phi on the GPU, with phi and eta in the buffers of the interpolation (phi_gpu, eta_gpu),
-// r in op->x_gpu (free at this point); asynchronous (default stream)
-static void cuda_fine_residual_core_PRECISION( operator_PRECISION_struct *op, level_struct *l,
-                                               struct Thread *threading ) {
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  const size_t n_sites = (size_t)l->num_inner_lattice_sites,
-               nsv     = (size_t)l->num_lattice_site_var,
-               n_fine  = (size_t)l->inner_vector_size;
-  const unsigned int block = 128;
-
-  // phi (ordering of the Schwarz operator, site by site) -> component-wise, D phi, back
-  reorderArrayByComponent<<< minGridSizeForN( n_sites, block ), block >>>( op->x_componentwise_gpu, is->phi_gpu,
-                                                                           nsv, n_sites );
-  cuda_safe_call( cudaDeviceSynchronize() );
-  cuda_d_plus_clover_PRECISION( op->w_componentwise_gpu, op->x_componentwise_gpu, op, l, threading );
-  reorderArrayByChunks<<< minGridSizeForN( n_sites, block ), block >>>( op->w_gpu, op->w_componentwise_gpu,
-                                                                        nsv, n_sites );
-  cuda_fine_residual_PRECISION_kernel<<< minGridSizeForN( n_fine, 256 ), 256 >>>( op->x_gpu, is->eta_gpu,
-                                                                                 op->w_gpu, n_fine );
-  cuda_check_error( _SOFT_CHECK );
-}
-
-
-extern "C" int cuda_fine_residual_PRECISION( vector_PRECISION r, vector_PRECISION phi, vector_PRECISION eta,
-                                             operator_PRECISION_struct *op, level_struct *l,
-                                             struct Thread *threading, int keep_on_gpu ) {
-
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  int use = ( l->depth == 0 && is->op_gpu != NULL && op->x_componentwise_gpu != NULL &&
-              is->phi_gpu_host == phi && is->eta_gpu_host == eta );
-
-  // every thread has read the tags before the master resets them
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-
-  START_LOCKED_MASTER(threading)
-  if ( is->phi_stale_host != NULL ) {
-    // phi was left only on the GPU by the interpolation: the host copy is needed by the CPU
-    // path (fallback) and by the smoothers that do not continue on the GPU
-    if ( !( use && keep_on_gpu ) )
-      cuda_safe_call( cudaMemcpy( is->phi_stale_host, is->phi_gpu,
-                                  (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
-                                  cudaMemcpyDeviceToHost ) );
-    is->phi_stale_host = NULL;
-  }
-  if ( is->eta_stale_host != NULL ) {
-    // eta was given to the restriction only on the GPU (outer FGMRES on the GPU)
-    if ( !( use && keep_on_gpu ) )
-      cuda_safe_call( cudaMemcpy( is->eta_stale_host, is->eta_gpu,
-                                  (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
-                                  cudaMemcpyDeviceToHost ) );
-    is->eta_stale_host = NULL;
-  }
-  if ( use ) {
-    const size_t n_fine = (size_t)l->inner_vector_size;
-    cuda_fine_residual_core_PRECISION( op, l, threading );
-    if ( keep_on_gpu ) {
-      // r stays in op->x_gpu for the odd-even part of the smoother (cuda_smoother_oe_prepare)
-      cuda_safe_call( cudaDeviceSynchronize() );
-    } else {
-      // synchronous copy: waits for the kernels
-      cuda_safe_call( cudaMemcpy( r, op->x_gpu, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-    }
-  }
-  is->phi_gpu_host = NULL;
-  is->eta_gpu_host = NULL;
-  END_LOCKED_MASTER(threading)
-  SYNC_HYPERTHREADS(threading)
-
-  return use;
-}
-
-
-// Schwarz layout (site by site) -> odd-even layout, component-wise within the even and the odd half
-__global__ void cuda_block_to_oe_cw_PRECISION_kernel( cu_cmplx_PRECISION *out_cw, const cu_cmplx_PRECISION *in,
-                                                      const int *perm, int n_sites, int n_even, int nsv ) {
-  int m = blockIdx.x*blockDim.x + threadIdx.x;
-  if ( m >= n_sites ) return;
-  int k = perm[m];
-  size_t stride = ( k < n_even ) ? (size_t)n_even : (size_t)(n_sites - n_even);
-  cu_cmplx_PRECISION *dst = ( k < n_even ) ? out_cw + k : out_cw + (size_t)n_even*nsv + (k - n_even);
-  const cu_cmplx_PRECISION *src = in + (size_t)m*nsv;
-  for ( int c=0; c<nsv; c++ )
-    dst[c*stride] = src[c];
-}
-
-// phi (Schwarz layout) += x (odd-even layout, component-wise)
-__global__ void cuda_oe_cw_add_to_block_PRECISION_kernel( cu_cmplx_PRECISION *phi, const cu_cmplx_PRECISION *x_cw,
-                                                          const int *perm, int n_sites, int n_even, int nsv ) {
-  int m = blockIdx.x*blockDim.x + threadIdx.x;
-  if ( m >= n_sites ) return;
-  int k = perm[m];
-  size_t stride = ( k < n_even ) ? (size_t)n_even : (size_t)(n_sites - n_even);
-  const cu_cmplx_PRECISION *src = ( k < n_even ) ? x_cw + k : x_cw + (size_t)n_even*nsv + (k - n_even);
-  cu_cmplx_PRECISION *dst = phi + (size_t)m*nsv;
-  for ( int c=0; c<nsv; c++ ) {
-    cu_cmplx_PRECISION a = dst[c], b = src[c*stride];
-    dst[c] = make_cu_cmplx_PRECISION( a.x + b.x, a.y + b.y );
-  }
-}
-
-
-// depth-0 odd-even buffers and the Schwarz -> odd-even site permutation, allocated on first use
-static void smoother_oe_buffers_PRECISION( level_struct *l ) {
-
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  if ( is->oe_b_gpu != NULL ) return;
-
-  const int n = l->num_inner_lattice_sites;
-  const size_t n_fine = (size_t)l->inner_vector_size;
-  const int *tt_oe = l->oe_op_PRECISION.translation_table, *tt_b = l->s_PRECISION.op.translation_table;
-  int *perm = (int*) malloc( n*sizeof(int) );
-  if ( perm == NULL || tt_oe == NULL || tt_b == NULL ) {
-    fprintf( stderr, "smoother_oe_buffers_PRECISION: translation tables or host memory not available\n" );
-    MPI_Abort( MPI_COMM_WORLD, 1 );
-  }
-  // same mapping as block_to_oddeven_PRECISION: out[tt_oe[i]] = in[tt_b[i]]
-  for ( int i=0; i<n; i++ )
-    perm[ tt_b[i] ] = tt_oe[i];
-
-  cuda_safe_call( cudaMalloc( (void**)&(is->oe_perm_gpu),  n*sizeof(int) ) );
-  cuda_safe_call( cudaMalloc( (void**)&(is->oe_b_gpu),     n_fine*sizeof(cu_cmplx_PRECISION) ) );
-  cuda_safe_call( cudaMalloc( (void**)&(is->oe_x_gpu),     n_fine*sizeof(cu_cmplx_PRECISION) ) );
-  cuda_safe_call( cudaMalloc( (void**)&(is->oe_chunk_gpu), n_fine*sizeof(cu_cmplx_PRECISION) ) );
-  cuda_safe_call( cudaMemcpy( is->oe_perm_gpu, perm, n*sizeof(int), cudaMemcpyHostToDevice ) );
-  free( perm );
-}
-
-
-// odd-even part of the depth-0 smoother, before the GMRES: r (in the GPU buffer x_gpu of the
-// Schwarz operator, left there by cuda_fine_residual_PRECISION with keep_on_gpu) -> odd-even
-// layout in oe_b_gpu, and preparation of the Schur source b_e = r_e - D_eo D_oo^-1 r_o (as
-// cuda_solve_oddeven_PRECISION). r_o stays in the odd half of oe_b_gpu for the reconstruction.
-static void smoother_oe_prepare_core_PRECISION( level_struct *l ) {
-
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION), *s_op = l->p_PRECISION.op;
-  cudaStream_t stream = cudaStreamPerThread;
-  cudaStream_t* const streams = &stream;
-  const int n = l->num_inner_lattice_sites, nsv = l->num_lattice_site_var,
-            n_even = op->num_even_sites, n_odd = op->num_odd_sites;
-  const int start_odd = n_even*nsv, len_odd = n_odd*nsv;
-  const unsigned int css = clover_site_size( nsv, l->depth );
-  cuda_vector_PRECISION b_cw = is->oe_b_gpu, tmp = op->buffer_gpu[0];
-
-  cuda_block_to_oe_cw_PRECISION_kernel<<< minGridSizeForN( n, 128 ), 128 >>>( b_cw, s_op->x_gpu, is->oe_perm_gpu,
-                                                                              n, n_even, nsv );
-  cuda_safe_call( cudaDeviceSynchronize() );
-
-  // odd to even: b_e <- b_e + D_eo ( - D_oo^-1 b_o )
-  cuda_diag_oo_inv_componentwise_PRECISION( tmp+start_odd, b_cw+start_odd, op->clover_componentwise_gpu+css*n_even,
-                                            n_odd, l );
-  cuda_vector_PRECISION_scale( tmp, tmp, make_cu_cmplx_PRECISION(-1.0,0.0), start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
-  cuda_hopping_term_PRECISION( b_cw, tmp, op, _EVEN_SITES, l );
-  cuda_safe_call( cudaDeviceSynchronize() );
-}
-
-
-// odd-even part of the depth-0 smoother, after the GMRES: with x_e in the even half of oe_x_gpu,
-// reconstruction of the odd sites x_o = D_oo^-1 ( r_o - D_oe x_e ) (as cuda_solve_oddeven_PRECISION),
-// phi += x in the Schwarz layout on the GPU (phi is still there from the interpolation) and one
-// copy of phi to the host.
-static void smoother_oe_finish_core_PRECISION( vector_PRECISION phi, level_struct *l ) {
-
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
-  cudaStream_t stream = cudaStreamPerThread;
-  cudaStream_t* const streams = &stream;
-  const int n = l->num_inner_lattice_sites, nsv = l->num_lattice_site_var,
-            n_even = op->num_even_sites, n_odd = op->num_odd_sites;
-  const int start_odd = n_even*nsv, len_odd = n_odd*nsv;
-  const unsigned int css = clover_site_size( nsv, l->depth );
-  cuda_vector_PRECISION b_cw = is->oe_b_gpu, x_cw = is->oe_x_gpu, tmp = op->buffer_gpu[0];
-
-  // x_o = D_oo^-1 b_o - D_oo^-1 D_oe x_e   (b_o = r_o, untouched by the preparation)
-  cuda_diag_oo_inv_componentwise_PRECISION( x_cw+start_odd, b_cw+start_odd, op->clover_componentwise_gpu+css*n_even,
-                                            n_odd, l );
-  cuda_vector_PRECISION_define( tmp, make_cu_cmplx_PRECISION(0,0), start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
-  cuda_hopping_term_PRECISION( tmp, x_cw, op, _ODD_SITES, l );
-  cuda_diag_oo_inv_componentwise_PRECISION( b_cw+start_odd, tmp+start_odd, op->clover_componentwise_gpu+css*n_even,
-                                            n_odd, l );
-  cuda_vector_PRECISION_minus( x_cw, x_cw, b_cw, start_odd, len_odd, l, _CUDA_SYNC, 0, streams );
-  cuda_safe_call( cudaDeviceSynchronize() );
-
-  // phi += x (correction), on the GPU, then one copy of phi to the host
-  cuda_oe_cw_add_to_block_PRECISION_kernel<<< minGridSizeForN( n, 128 ), 128 >>>( is->phi_gpu, x_cw, is->oe_perm_gpu,
-                                                                                  n, n_even, nsv );
-  cuda_check_error( _SOFT_CHECK );
-  if ( is->keep_phi_result ) {
-    // the outer FGMRES on the GPU reads phi from phi_gpu
-    cuda_safe_call( cudaDeviceSynchronize() );
-    is->phi_result_host = phi;
-  } else {
-    cuda_safe_call( cudaMemcpy( phi, is->phi_gpu, (size_t)l->inner_vector_size*sizeof(cu_cmplx_PRECISION),
-                                cudaMemcpyDeviceToHost ) );
-  }
-}
-
-
-// Step-B entry points (GMRES on the CPU): kept to compare with the GPU GMRES, see
-// SMOOTHER_GMRES_ON_CPU in vcycle_generic.c. b_e goes to the host before the GMRES, x_e comes back.
-extern "C" void cuda_smoother_oe_prepare_PRECISION( vector_PRECISION b, level_struct *l, struct Thread *threading ) {
-
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-  START_LOCKED_MASTER(threading)
-  smoother_oe_buffers_PRECISION( l );
-  smoother_oe_prepare_core_PRECISION( l );
-  const int n_even = l->oe_op_PRECISION.num_even_sites, nsv = l->num_lattice_site_var;
-  reorderArrayByChunks<<< minGridSizeForN( n_even, 128 ), 128 >>>( l->is_PRECISION.oe_chunk_gpu, l->is_PRECISION.oe_b_gpu,
-                                                                    (size_t)nsv, (size_t)n_even );
-  cuda_safe_call( cudaMemcpy( b, l->is_PRECISION.oe_chunk_gpu, (size_t)n_even*nsv*sizeof(cu_cmplx_PRECISION),
-                              cudaMemcpyDeviceToHost ) );
-  END_LOCKED_MASTER(threading)
-  SYNC_HYPERTHREADS(threading)
-}
-
-extern "C" void cuda_smoother_oe_finish_PRECISION( vector_PRECISION phi, vector_PRECISION x, level_struct *l,
-                                                   struct Thread *threading ) {
-
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-  START_LOCKED_MASTER(threading)
-  const int n_even = l->oe_op_PRECISION.num_even_sites, nsv = l->num_lattice_site_var;
-  cuda_safe_call( cudaMemcpy( l->is_PRECISION.oe_chunk_gpu, x, (size_t)n_even*nsv*sizeof(cu_cmplx_PRECISION),
-                              cudaMemcpyHostToDevice ) );
-  reorderArrayByComponent<<< minGridSizeForN( n_even, 128 ), 128 >>>( l->is_PRECISION.oe_x_gpu, l->is_PRECISION.oe_chunk_gpu,
-                                                                      (size_t)nsv, (size_t)n_even );
-  cuda_safe_call( cudaDeviceSynchronize() );
-  smoother_oe_finish_core_PRECISION( phi, l );
-  END_LOCKED_MASTER(threading)
-  SYNC_HYPERTHREADS(threading)
-}
-
-
-#define CUBLAS_CHECK_INTERP(call)                                                 \
-  do {                                                                            \
-    cublasStatus_t st_ = (call);                                                  \
-    if ( st_ != CUBLAS_STATUS_SUCCESS ) {                                         \
-      fprintf( stderr, "cuBLAS error %d at %s:%d\n", (int)st_, __FILE__, __LINE__ ); \
-      MPI_Abort( MPI_COMM_WORLD, 1 );                                             \
-    }                                                                             \
-  } while (0)
-
-// cuBLAS calls for both precisions (overloads, so that this generic file works for float and double)
-static inline cublasStatus_t blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n, const cuFloatComplex *alpha,
-                                        const cuFloatComplex *A, int lda, const cuFloatComplex *x,
-                                        const cuFloatComplex *beta, cuFloatComplex *y ) {
-  return cublasCgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
-static inline cublasStatus_t blas_gemv( cublasHandle_t h, cublasOperation_t t, int m, int n, const cuDoubleComplex *alpha,
-                                        const cuDoubleComplex *A, int lda, const cuDoubleComplex *x,
-                                        const cuDoubleComplex *beta, cuDoubleComplex *y ) {
-  return cublasZgemv( h, t, m, n, alpha, A, lda, x, 1, beta, y, 1 ); }
-static inline cublasStatus_t blas_nrm2( cublasHandle_t h, int n, const cuFloatComplex *x, float *r ) {
-  return cublasScnrm2( h, n, x, 1, r ); }
-static inline cublasStatus_t blas_nrm2( cublasHandle_t h, int n, const cuDoubleComplex *x, double *r ) {
-  return cublasDznrm2( h, n, x, 1, r ); }
-static inline cublasStatus_t blas_rscal( cublasHandle_t h, int n, float a, cuFloatComplex *x ) {
-  return cublasCsscal( h, n, &a, x, 1 ); }
-static inline cublasStatus_t blas_rscal( cublasHandle_t h, int n, double a, cuDoubleComplex *x ) {
-  return cublasZdscal( h, n, &a, x, 1 ); }
-static inline cublasStatus_t blas_copy( cublasHandle_t h, int n, const cuFloatComplex *x, cuFloatComplex *y ) {
-  return cublasCcopy( h, n, x, 1, y, 1 ); }
-static inline cublasStatus_t blas_copy( cublasHandle_t h, int n, const cuDoubleComplex *x, cuDoubleComplex *y ) {
-  return cublasZcopy( h, n, x, 1, y, 1 ); }
-static inline cublasStatus_t blas_axpy( cublasHandle_t h, int n, const cuFloatComplex *a, const cuFloatComplex *x,
-                                        cuFloatComplex *y ) {
-  return cublasCaxpy( h, n, a, x, 1, y, 1 ); }
-static inline cublasStatus_t blas_axpy( cublasHandle_t h, int n, const cuDoubleComplex *a, const cuDoubleComplex *x,
-                                        cuDoubleComplex *y ) {
-  return cublasZaxpy( h, n, a, x, 1, y, 1 ); }
-
-static cublasHandle_t smoother_cublas_PRECISION = NULL;
-
-
-// GMRES on the Schur complement of the depth-0 smoother, entirely on the GPU. b and x are the even
-// halves of oe_b_gpu and oe_x_gpu (component-wise layout, as used by the fork's Schur complement).
-// Same algorithm as fgmres_PRECISION for this smoother: no preconditioner, classical Gram-Schmidt,
-// restart_length steps per restart, num_restart restarts, stop if the estimated relative residual
-// drops below p->tol. Inner products and norms are reduced over the processes on the host
-// (MPI_Allreduce of j+1 numbers, as on the CPU); the small Hessenberg problem is solved on the host.
-static int smoother_gmres_gpu_PRECISION( gmres_PRECISION_struct *p, level_struct *l ) {
-
-  typedef std::complex<double> cd;
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  operator_PRECISION_struct *op = &(l->oe_op_PRECISION);
-  const int m = p->restart_length;
-  const int n = op->num_even_sites * l->num_lattice_site_var;   // even half: the Schur system
-  const int ld = l->inner_vector_size;                           // column stride of the basis V
-
-  if ( smoother_cublas_PRECISION == NULL ) {
-    CUBLAS_CHECK_INTERP( cublasCreate( &smoother_cublas_PRECISION ) );
-    CUBLAS_CHECK_INTERP( cublasSetPointerMode( smoother_cublas_PRECISION, CUBLAS_POINTER_MODE_HOST ) );
-  }
-  cublasHandle_t h = smoother_cublas_PRECISION;
-  if ( is->oe_V_cols < m+1 ) {
-    if ( is->oe_V_gpu != NULL ) {
-      cuda_safe_call( cudaFree( is->oe_V_gpu ) );
-      cuda_safe_call( cudaFree( is->oe_h_gpu ) );
-    }
-    cuda_safe_call( cudaMalloc( (void**)&(is->oe_V_gpu), (size_t)(m+1)*ld*sizeof(cu_cmplx_PRECISION) ) );
-    cuda_safe_call( cudaMalloc( (void**)&(is->oe_h_gpu), (size_t)(m+1)*sizeof(cu_cmplx_PRECISION) ) );
-    is->oe_V_cols = m+1;
-  }
-
-  cu_cmplx_PRECISION *V = is->oe_V_gpu, *b = is->oe_b_gpu, *x = is->oe_x_gpu, *r = is->oe_chunk_gpu, *hd = is->oe_h_gpu;
-  const cu_cmplx_PRECISION one = make_cu_cmplx_PRECISION(1,0), zero = make_cu_cmplx_PRECISION(0,0),
-                           mone = make_cu_cmplx_PRECISION(-1,0);
-  std::vector<cd> H( (size_t)m*(m+1) ), gam( m+1 ), sn( m ), cs( m ), y( m );
-  std::vector<cu_cmplx_PRECISION> hloc( m+1 ), hglob( m+1 );
-  auto Hc = [&]( int col, int row ) -> cd& { return H[ (size_t)col*(m+1) + row ]; };   // H[j][i] of the CPU code
-
-  // global 2-norm over the even half of all processes
-  auto global_norm = [&]( const cu_cmplx_PRECISION *v ) -> double {
-    PRECISION nl = 0;
-    CUBLAS_CHECK_INTERP( blas_nrm2( h, n, v, &nl ) );
-    PRECISION sq = nl*nl, sq_glob = sq;
-    if ( g.num_processes > 1 )
-      MPI_Allreduce( &sq, &sq_glob, 1, MPI_PRECISION, MPI_SUM, g.comm_cart );
-    return sqrt( (double)sq_glob );
-  };
-
-  double norm_r0 = 1, gamma_jp1 = 1;
-  int finish = 0, iter = 0, j = -1;
-
-  for ( int ol=0; ol<p->num_restart && finish==0; ol++ ) {
-    int res;
-    if ( ol == 0 && p->initial_guess_zero ) {
-      res = _NO_RES;
-      CUBLAS_CHECK_INTERP( blas_copy( h, n, b, r ) );                       // r = b
-    } else {
-      res = _RES;
-      cuda_apply_schur_complement_PRECISION( r, x, op, l );                 // r = S x
-      CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(-1.0), r ) );      // r = b - S x
-      CUBLAS_CHECK_INTERP( blas_axpy( h, n, &one, b, r ) );
-    }
-    double gamma0 = global_norm( r );
-    gam[0] = gamma0;
-    if ( ol == 0 ) norm_r0 = gamma0;
-    CUBLAS_CHECK_INTERP( blas_copy( h, n, r, V ) );                         // v_0 = r / gamma_0
-    CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(1.0/gamma0), V ) );
-
-    for ( int il=0; il<m && finish==0; il++ ) {
-      j = il; iter++;
-      cu_cmplx_PRECISION *vj = V + (size_t)j*ld, *w = V + (size_t)(j+1)*ld; // w is built in place of v_{j+1}
-
-      cuda_apply_schur_complement_PRECISION( w, vj, op, l );                // w = S v_j
-
-      // h_i = <v_i, w>, i = 0..j, reduced over the processes
-      CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_C, n, j+1, &one, V, ld, w, &zero, hd ) );
-      cuda_safe_call( cudaMemcpy( hloc.data(), hd, (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-      if ( g.num_processes > 1 )
-        MPI_Allreduce( hloc.data(), hglob.data(), j+1, MPI_COMPLEX_PRECISION, MPI_SUM, g.comm_cart );
-      else
-        hglob = hloc;
-      for ( int i=0; i<=j; i++ ) Hc(j,i) = cd( hglob[i].x, hglob[i].y );
-
-      // w = w - sum_i h_i v_i  (classical Gram-Schmidt, as on the CPU)
-      cuda_safe_call( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-      CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_N, n, j+1, &mone, V, ld, hd, &one, w ) );
-
-      // h_{j+1} = ||w||, v_{j+1} = w / h_{j+1}
-      double hn = global_norm( w );
-      Hc(j,j+1) = hn;
-      if ( hn > 1e-15 ) CUBLAS_CHECK_INTERP( blas_rscal( h, n, (PRECISION)(1.0/hn), w ) );
-
-      if ( std::abs( Hc(j,j+1) ) > p->tol/10 ) {
-        // Givens rotations (qr_update_PRECISION)
-        for ( int i=0; i<j; i++ ) {
-          cd beta = (-sn[i])*Hc(j,i) + cs[i]*Hc(j,i+1);
-          Hc(j,i) = std::conj(cs[i])*Hc(j,i) + std::conj(sn[i])*Hc(j,i+1);
-          Hc(j,i+1) = beta;
-        }
-        double beta = sqrt( std::norm( Hc(j,j) ) + std::norm( Hc(j,j+1) ) );
-        sn[j] = Hc(j,j+1)/beta; cs[j] = Hc(j,j)/beta;
-        gam[j+1] = (-sn[j])*gam[j]; gam[j] = std::conj(cs[j])*gam[j];
-        Hc(j,j) = beta; Hc(j,j+1) = 0;
-        gamma_jp1 = std::abs( gam[j+1] );
-        if ( gamma_jp1/norm_r0 < p->tol || gamma_jp1/norm_r0 > 1E+5 ) {
-          finish = 1;
-          if ( gamma_jp1/norm_r0 > 1E+5 ) printf0("Divergence of smoother_gmres_gpu_PRECISION, iter = %d\n", iter );
-        }
-      } else {
-        printf0("depth: %d, iter: %d, smoother GMRES (GPU) H(%d,%d) = %+lf+%lfi\n", l->depth, iter, j+1, j,
-                Hc(j,j+1).real(), Hc(j,j+1).imag() );
-        finish = 1;
-        break;
-      }
-    }
-
-    // x = x + sum_i y_i v_i (or x = sum_i y_i v_i after a zero initial guess): compute_solution_PRECISION
-    for ( int i=j; i>=0; i-- ) {
-      y[i] = gam[i];
-      for ( int k=i+1; k<=j; k++ ) y[i] -= Hc(k,i)*y[k];
-      y[i] /= Hc(i,i);
-    }
-    for ( int i=0; i<=j; i++ ) hglob[i] = make_cu_cmplx_PRECISION( (PRECISION)y[i].real(), (PRECISION)y[i].imag() );
-    cuda_safe_call( cudaMemcpy( hd, hglob.data(), (j+1)*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-    int add = ( res == _NO_RES ) ? ol : 1;
-    CUBLAS_CHECK_INTERP( blas_gemv( h, CUBLAS_OP_N, n, j+1, &one, V, ld, hd, add ? &one : &zero, x ) );
-  }
-  cuda_safe_call( cudaDeviceSynchronize() );
-  return iter;
-}
-
-
-// Depth-0 method-4 smoother after the GPU residual, entirely on the GPU: odd-even preparation,
-// GMRES on the Schur complement, reconstruction, phi += correction, one copy of phi to the host.
-// Called by all threads (the work is done by the master); returns the number of GMRES iterations.
-extern "C" int cuda_smoother_oe_gmres_PRECISION( vector_PRECISION phi, gmres_PRECISION_struct *p, level_struct *l,
-                                                 struct Thread *threading ) {
-
-  int iter = 0;
-  SYNC_CORES(threading)
-  SYNC_HYPERTHREADS(threading)
-  START_LOCKED_MASTER(threading)
-  smoother_oe_buffers_PRECISION( l );
-  smoother_oe_prepare_core_PRECISION( l );
-  iter = smoother_gmres_gpu_PRECISION( p, l );
-  smoother_oe_finish_core_PRECISION( phi, l );
-  END_LOCKED_MASTER(threading)
-  SYNC_HYPERTHREADS(threading)
-  return iter;
-}
-
-#ifdef CUDA_PIECE_BENCHMARK
-
-static double piece_bench_median_PRECISION( std::vector<double> &v ) {
-  std::vector<double> w( v );
-  std::sort( w.begin(), w.end() );
-  return w[ w.size()/2 ];
-}
-
-// Benchmark of the pieces of the depth-0 smoother on the GPU (build with -DCUDA_PIECE_BENCHMARK),
-// called by one thread after the solve: the smoother buffers on the GPU are overwritten.
-// phi_h, eta_h: host vectors (inner sites) copied to the buffers of the interpolation as input.
-// Every piece is timed with MPI_Wtime after a barrier (the pieces end with a synchronisation).
-// t (ms, medians over reps):
-//   t[0] residual r = eta - D phi                                  (step A, cuda_fine_residual_core)
-//   t[1] odd-even preparation + reconstruction and phi += x         (step B, prepare + finish core)
-//   t[2] GMRES on the Schur complement                              (step C)
-//   t[3] copy of phi to the host, avoided by step D
-extern "C" void cuda_smoother_PRECISION_bench( gmres_PRECISION_struct *p, vector_PRECISION phi_h,
-                                               vector_PRECISION eta_h, level_struct *l, int reps, double *t ) {
-
-  interpolation_PRECISION_struct *is = &(l->is_PRECISION);
-  operator_PRECISION_struct *op = l->p_PRECISION.op;
-  const size_t n_fine = (size_t)l->inner_vector_size;
-  std::vector<double> ta, tb, tc, td;
-
-  smoother_oe_buffers_PRECISION( l );
-  cuda_safe_call( cudaMemcpy( is->phi_gpu, phi_h, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  cuda_safe_call( cudaMemcpy( is->eta_gpu, eta_h, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
-  int keep = is->keep_phi_result;
-  vector_PRECISION result_host = is->phi_result_host;
-  int igz = p->initial_guess_zero;
-
-  for ( int r=0; r<reps; r++ ) {
-    double t0;
-    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
-    cuda_fine_residual_core_PRECISION( op, l, no_threading );
-    cuda_safe_call( cudaDeviceSynchronize() );
-    ta.push_back( 1e3*( MPI_Wtime() - t0 ) );
-
-    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
-    smoother_oe_prepare_core_PRECISION( l );
-    double t_prep = 1e3*( MPI_Wtime() - t0 );
-
-    p->initial_guess_zero = _NO_RES;
-    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
-    smoother_gmres_gpu_PRECISION( p, l );
-    tc.push_back( 1e3*( MPI_Wtime() - t0 ) );
-
-    is->keep_phi_result = 1;   // phi stays on the GPU: the copy is timed below
-    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
-    smoother_oe_finish_core_PRECISION( phi_h, l );
-    tb.push_back( t_prep + 1e3*( MPI_Wtime() - t0 ) );
-
-    MPI_Barrier( g.comm_cart ); t0 = MPI_Wtime();
-    cuda_safe_call( cudaMemcpy( phi_h, is->phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
-    td.push_back( 1e3*( MPI_Wtime() - t0 ) );
-  }
-  is->keep_phi_result = keep;
-  is->phi_result_host = result_host;
-  p->initial_guess_zero = igz;
-
-  t[0] = piece_bench_median_PRECISION( ta );
-  t[1] = piece_bench_median_PRECISION( tb );
-  t[2] = piece_bench_median_PRECISION( tc );
-  t[3] = piece_bench_median_PRECISION( td );
-}
-
-#endif
 
 #ifdef CUDA_INTERP_BENCHMARK
 
@@ -1234,8 +715,7 @@ static int cuda_interp_bench_cmp_PRECISION( const void *a, const void *b ) {
 // Benchmark of the GPU parts of one call (called by one thread): median over reps of the
 // host-to-device copies, the kernel and the device-to-host copy, in ms, with CUDA events.
 // op: 0 restriction, 1 interpolation phi += P phi_c, 2 interpolation phi = P phi_c.
-// Uses its own device buffers (the ones of the interpolation may hold phi and eta for the depth-0
-// smoother on the GPU) and pageable host buffers, as the vectorwrappers.
+// Uses the device buffers of the interpolation and pageable host buffers, as the vectorwrappers.
 // t[0] = HtoD, t[1] = kernel, t[2] = DtoH, t[3] = 1 if the SSE layout of P is used, 0 otherwise.
 extern "C" void cuda_interpolation_PRECISION_bench( level_struct *l, int op, int reps, double *t ) {
 
@@ -1248,31 +728,28 @@ extern "C" void cuda_interpolation_PRECISION_bench( level_struct *l, int op, int
     fprintf( stderr, "interpolation benchmark: host allocation failed\n" );
     MPI_Abort( MPI_COMM_WORLD, 1 );
   }
-  cu_cmplx_PRECISION *d_fine = NULL, *d_coarse = NULL;
-  cuda_safe_call( cudaMalloc( (void**)&d_fine,   n_fine*sizeof(cu_cmplx_PRECISION) ) );
-  cuda_safe_call( cudaMalloc( (void**)&d_coarse, n_coarse*sizeof(cu_cmplx_PRECISION) ) );
   cudaEvent_t e[4];
   for ( int i=0; i<4; i++ ) cuda_safe_call( cudaEventCreate( &e[i] ) );
 
   for ( int r=0; r<reps; r++ ) {
     cuda_safe_call( cudaEventRecord( e[0] ) );
     if ( op == 0 ) {
-      cuda_safe_call( cudaMemcpy( d_fine, h_fine, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+      cuda_safe_call( cudaMemcpy( l->is_PRECISION.phi_gpu, h_fine, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
     } else {
-      cuda_safe_call( cudaMemcpy( d_coarse, h_coarse, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+      cuda_safe_call( cudaMemcpy( l->is_PRECISION.phi_c_gpu, h_coarse, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
       if ( op == 1 )
-        cuda_safe_call( cudaMemcpy( d_fine, h_fine, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
+        cuda_safe_call( cudaMemcpy( l->is_PRECISION.phi_gpu, h_fine, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyHostToDevice ) );
     }
     cuda_safe_call( cudaEventRecord( e[1] ) );
     if ( op == 0 )
-      cuda_restrict_PRECISION( d_coarse, d_fine, l );
+      cuda_restrict_PRECISION( l->is_PRECISION.phi_c_gpu, l->is_PRECISION.phi_gpu, l );
     else
-      cuda_interpolate_PRECISION( d_fine, d_coarse, l, op == 1 );
+      cuda_interpolate_PRECISION( l->is_PRECISION.phi_gpu, l->is_PRECISION.phi_c_gpu, l, op == 1 );
     cuda_safe_call( cudaEventRecord( e[2] ) );
     if ( op == 0 )
-      cuda_safe_call( cudaMemcpy( h_coarse, d_coarse, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+      cuda_safe_call( cudaMemcpy( h_coarse, l->is_PRECISION.phi_c_gpu, n_coarse*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
     else
-      cuda_safe_call( cudaMemcpy( h_fine, d_fine, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
+      cuda_safe_call( cudaMemcpy( h_fine, l->is_PRECISION.phi_gpu, n_fine*sizeof(cu_cmplx_PRECISION), cudaMemcpyDeviceToHost ) );
     cuda_safe_call( cudaEventRecord( e[3] ) );
     cuda_safe_call( cudaEventSynchronize( e[3] ) );
     for ( int i=0; i<3; i++ ) {
@@ -1288,8 +765,6 @@ extern "C" void cuda_interpolation_PRECISION_bench( level_struct *l, int op, int
   t[3] = restrict_sse_layout_PRECISION ? 1 : 0;
 
   for ( int i=0; i<4; i++ ) cuda_safe_call( cudaEventDestroy( e[i] ) );
-  cuda_safe_call( cudaFree( d_fine ) );
-  cuda_safe_call( cudaFree( d_coarse ) );
   free( h_fine ); free( h_coarse ); free( tm );
 }
 

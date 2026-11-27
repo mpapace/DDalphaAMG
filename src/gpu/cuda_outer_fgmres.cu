@@ -1,72 +1,59 @@
-// Outer FGMRES of the solve on the GPU (step E of the finest-level GPU residency).
+// Outer FGMRES of the solve on the GPU.
 //
 // Same algorithm as fgmres_double for the outer solver (right preconditioning with the float
 // V-cycle, classical Gram-Schmidt, restarts, stop on the estimated relative residual), with the
-// fine vectors kept on the GPU: V, Z, x, b in double, lexicographic ordering of g.op_double,
-// 12 components per site. The V-cycle reads its right-hand side from the GPU (eta_gpu of the
-// depth-0 interpolation) and leaves its result there (phi_gpu), see cuda_interpolation_generic.cu.
-// Only scalars go through the host (MPI reductions, Hessenberg matrix, Givens rotations).
+// fine vectors kept on the GPU: V, Z, x, b, w in double, lexicographic ordering of g.op_double.
+// The V-cycle takes its right-hand side from the GPU (eta_gpu of the depth-0 interpolation struct,
+// written here, see eta_preloaded_host in cuda_restrict_PRECISION_vectorwrapper) and the depth-0
+// smoother leaves its result there (phi_gpu, see keep_phi_on_gpu in
+// cuda_solve_oddeven_PRECISION_resident). Only scalars go through the host: the MPI reductions of
+// the dot products, the Hessenberg matrix and the Givens rotations.
+// Vector operations: the GPU linear algebra of the depth-0 smoother (cuda_linalg_double).
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <string.h>
-#include <cublas_v2.h>
 #include <complex>
 #include <vector>
-#include <algorithm>
+
+#include "gpu/cuda_componentwise.h"
+#include "gpu/cuda_linalg_double.h"
 
 extern "C"{
 
   #define IMPORT_FROM_EXTERN_C
   #include "main.h"
   #undef IMPORT_FROM_EXTERN_C
+  #include "profiling.h"
 
-  #include "operator.h"
+  #include "gpu/cuda_oddeven_linalg_double.h"
 
   // vcycle_float.h is not included by main.h in CUDA files (IMPORT_FROM_EXTERN_C)
   void vcycle_float( vector_float phi, vector_float Dphi, vector_float eta,
                      int res, level_struct *l, struct Thread *threading );
 }
 
-#include "cuda_componentwise.h"
-#include "cuda_outer_fgmres.h"
+#include "gpu/cuda_miscellaneous.h"
+#include "gpu/cuda_dirac_double.h"
+#include "gpu/cuda_outer_fgmres.h"
+
+constexpr uint diracDefaultBlockSize = 128;
 
 #ifdef CUDA_OPT
 
-#define CUDA_CHECK_OUTER(call)                                                    \
-  do {                                                                            \
-    cudaError_t err_ = (call);                                                    \
-    if ( err_ != cudaSuccess ) {                                                  \
-      fprintf( stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,           \
-               cudaGetErrorString(err_) );                                        \
-      MPI_Abort( MPI_COMM_WORLD, 1 );                                             \
-    }                                                                             \
-  } while (0)
-
-#define CUBLAS_CHECK_OUTER(call)                                                  \
-  do {                                                                            \
-    cublasStatus_t st_ = (call);                                                  \
-    if ( st_ != CUBLAS_STATUS_SUCCESS ) {                                         \
-      fprintf( stderr, "cuBLAS error %d at %s:%d\n", (int)st_, __FILE__, __LINE__ ); \
-      MPI_Abort( MPI_COMM_WORLD, 1 );                                             \
-    }                                                                             \
-  } while (0)
-
 typedef std::complex<double> cd_outer;
 
-// state of the outer solver: written by the master, read by all threads after a barrier
+// GPU vectors of the outer solver, allocated at the first solve (and again if the sizes change)
 static struct {
-  cublasHandle_t h;
-  cu_cmplx_double *V, *Z, *x, *b, *w, *hd;   // V: m+1 columns, Z: m columns, column stride vl
-  int *tt;                                     // lexicographic site -> Schwarz site (s_float)
-  size_t vl;
-  int m;
-  int finish, stop_restart;
-} og = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0 };
+  cuda_vector_double *V, *Z;   // m+1 and m columns
+  cuda_vector_double x, b, w;
+  int *tt;                     // lexicographic site -> Schwarz site (l->s_float.op.translation_table)
+  int vl, m;
+  int finish, stop_restart;    // written by the master, read by all threads after a barrier
+} og = { NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0 };
 
 
-// double, lexicographic -> float, Schwarz ordering (trans_float on the GPU)
+// double, lexicographic ordering -> float, Schwarz ordering (trans_float on the GPU)
 __global__ void outer_trans_float_kernel( cu_cmplx_float *out, const cu_cmplx_double *in, const int *tt,
                                           size_t n_sites, int nsv ) {
   size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
@@ -76,7 +63,7 @@ __global__ void outer_trans_float_kernel( cu_cmplx_float *out, const cu_cmplx_do
   out[(size_t)tt[site]*nsv + c] = make_cuFloatComplex( (float)v.x, (float)v.y );
 }
 
-// float, Schwarz ordering -> double, lexicographic (trans_back_float on the GPU)
+// float, Schwarz ordering -> double, lexicographic ordering (trans_back_float on the GPU)
 __global__ void outer_trans_back_float_kernel( cu_cmplx_double *out, const cu_cmplx_float *in, const int *tt,
                                                size_t n_sites, int nsv ) {
   size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
@@ -87,15 +74,17 @@ __global__ void outer_trans_back_float_kernel( cu_cmplx_double *out, const cu_cm
 }
 
 
+// 1 if the outer FGMRES of this solve can run on the GPU: depth-0 FGMRES in double precision with
+// the mixed-precision V-cycle (method 4, odd-even, one cycle) as right preconditioner, and the
+// GPU buffers of the depth-0 operator, smoother and interpolation in place
 extern "C" int cuda_outer_fgmres_applicable( gmres_double_struct *p, level_struct *l ) {
-#if defined( OUTER_FGMRES_ON_CPU ) || defined( GCR_SMOOTHER ) || defined( RICHARDSON_SMOOTHER ) || \
-    defined( CUDA_RESTRICT_TEST ) || defined( HALF_PREC_STORAGE )
+#if defined( OUTER_FGMRES_ON_CPU ) || defined( GCR_SMOOTHER ) || defined( HALF_PREC_STORAGE )
   return 0;
 #else
-  const double *sh = (const double*) &(p->shift);
   return ( l->depth == 0 && g.mixed_precision == 1 && g.method == 4 && g.odd_even && g.interpolation &&
            l->level > 0 && l->n_cy == 1 && p->preconditioner != NULL && p->kind == _RIGHT &&
-           sh[0] == 0 && sh[1] == 0 && p->op == &(g.op_double) && g.vt.p_end == NULL && !g.vt.evaluation &&
+           creal_double(p->shift) == 0 && cimag_double(p->shift) == 0 && p->op == &(g.op_double) &&
+           g.vt.p_end == NULL && !g.vt.evaluation &&
            p->op->x_componentwise_gpu != NULL && p->op->w_componentwise_gpu != NULL &&
            l->is_float.op_gpu != NULL && l->is_float.eta_gpu != NULL && l->is_float.phi_gpu != NULL &&
            l->num_lattice_site_var == 12 );
@@ -104,143 +93,99 @@ extern "C" int cuda_outer_fgmres_applicable( gmres_double_struct *p, level_struc
 
 
 static void outer_buffers( gmres_double_struct *p, level_struct *l ) {
-  size_t vl = (size_t)l->inner_vector_size;
-  int m = p->restart_length;
-  if ( og.h == NULL ) {
-    CUBLAS_CHECK_OUTER( cublasCreate( &og.h ) );
-    CUBLAS_CHECK_OUTER( cublasSetPointerMode( og.h, CUBLAS_POINTER_MODE_HOST ) );
-  }
+  int vl = l->inner_vector_size, m = p->restart_length;
   if ( og.vl != vl || og.m != m ) {
     if ( og.V != NULL ) {
-      CUDA_CHECK_OUTER( cudaFree( og.V ) ); CUDA_CHECK_OUTER( cudaFree( og.Z ) );
-      CUDA_CHECK_OUTER( cudaFree( og.x ) ); CUDA_CHECK_OUTER( cudaFree( og.b ) );
-      CUDA_CHECK_OUTER( cudaFree( og.w ) ); CUDA_CHECK_OUTER( cudaFree( og.hd ) );
+      for ( int i=0; i<=og.m; i++ ) cuda_safe_call( cudaFree( og.V[i] ) );
+      for ( int i=0; i<og.m; i++ )  cuda_safe_call( cudaFree( og.Z[i] ) );
+      free( og.V ); free( og.Z );
+      cuda_safe_call( cudaFree( og.x ) ); cuda_safe_call( cudaFree( og.b ) ); cuda_safe_call( cudaFree( og.w ) );
     }
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.V, (size_t)(m+1)*vl*sizeof(cu_cmplx_double) ) );
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.Z, (size_t)m*vl*sizeof(cu_cmplx_double) ) );
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.x, vl*sizeof(cu_cmplx_double) ) );
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.b, vl*sizeof(cu_cmplx_double) ) );
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.w, vl*sizeof(cu_cmplx_double) ) );
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.hd, (size_t)(m+1)*sizeof(cu_cmplx_double) ) );
+    og.V = (cuda_vector_double*) malloc( (m+1)*sizeof(cuda_vector_double) );
+    og.Z = (cuda_vector_double*) malloc( m*sizeof(cuda_vector_double) );
+    if ( og.V == NULL || og.Z == NULL ) {
+      fprintf( stderr, "cuda_outer_fgmres_double: host allocation failed\n" );
+      MPI_Abort( MPI_COMM_WORLD, 1 );
+    }
+    for ( int i=0; i<=m; i++ ) cuda_safe_call( cudaMalloc( (void**)&(og.V[i]), (size_t)vl*sizeof(cu_cmplx_double) ) );
+    for ( int i=0; i<m; i++ )  cuda_safe_call( cudaMalloc( (void**)&(og.Z[i]), (size_t)vl*sizeof(cu_cmplx_double) ) );
+    cuda_safe_call( cudaMalloc( (void**)&og.x, (size_t)vl*sizeof(cu_cmplx_double) ) );
+    cuda_safe_call( cudaMalloc( (void**)&og.b, (size_t)vl*sizeof(cu_cmplx_double) ) );
+    cuda_safe_call( cudaMalloc( (void**)&og.w, (size_t)vl*sizeof(cu_cmplx_double) ) );
     og.vl = vl; og.m = m;
   }
   if ( og.tt == NULL ) {
     // the translation table is fixed after the setup of the Schwarz layout
     size_t n = (size_t)l->num_inner_lattice_sites;
-    CUDA_CHECK_OUTER( cudaMalloc( (void**)&og.tt, n*sizeof(int) ) );
-    CUDA_CHECK_OUTER( cudaMemcpy( og.tt, l->s_float.op.translation_table, n*sizeof(int), cudaMemcpyHostToDevice ) );
+    cuda_safe_call( cudaMalloc( (void**)&og.tt, n*sizeof(int) ) );
+    cuda_safe_call( cudaMemcpy( og.tt, l->s_float.op.translation_table, n*sizeof(int), cudaMemcpyHostToDevice ) );
   }
 }
 
-// out = D in, D = g.op_double on the GPU (as the d_plus_clover proxy, without the host copies)
-static void outer_apply_D( cu_cmplx_double *out, const cu_cmplx_double *in, operator_double_struct *op,
+// out = D in, D = g.op_double on the GPU (as cuda_d_plus_clover_double_vectorwrapper, without the host copies)
+static void outer_apply_D( cuda_vector_double out, cuda_vector_double in, operator_double_struct *op,
                            level_struct *l, struct Thread *threading ) {
   const size_t n = (size_t)l->num_inner_lattice_sites, nsv = (size_t)l->num_lattice_site_var;
-  reorderArrayByComponent<<< minGridSizeForN( n, 128 ), 128 >>>( op->x_componentwise_gpu, in, nsv, n );
-  CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
+  const uint grid = minGridSizeForN( n, diracDefaultBlockSize );
+  reorderArrayByComponent<<< grid, diracDefaultBlockSize >>>( op->x_componentwise_gpu, in, nsv, n );
+  cuda_safe_call( cudaDeviceSynchronize() );
   cuda_d_plus_clover_double( op->w_componentwise_gpu, op->x_componentwise_gpu, op, l, threading );
-  reorderArrayByChunks<<< minGridSizeForN( n, 128 ), 128 >>>( out, op->w_componentwise_gpu, nsv, n );
-  CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
+  reorderArrayByChunks<<< grid, diracDefaultBlockSize >>>( out, op->w_componentwise_gpu, nsv, n );
+  cuda_safe_call( cudaDeviceSynchronize() );
 }
 
-// global 2-norm (sum of the local squares, MPI_Allreduce, sqrt: as global_norm_double)
-static double outer_norm( const cu_cmplx_double *v, size_t vl ) {
-  double nl = 0;
-  CUBLAS_CHECK_OUTER( cublasDznrm2( og.h, (int)vl, v, 1, &nl ) );
-  double sq = nl*nl, sq_glob = sq;
-  if ( g.num_processes > 1 )
-    MPI_Allreduce( &sq, &sq_glob, 1, MPI_DOUBLE, MPI_SUM, g.comm_cart );
-  return sqrt( sq_glob );
+// global 2-norm (MPI reduction inside cuda_global_inner_product_double)
+static double outer_norm( cuda_vector_double v, gmres_double_struct *p, level_struct *l, struct Thread *threading ) {
+  complex_double d;
+  cuda_global_inner_product_double( &v, v, &d, 1, 0, og.vl, p, l, threading );
+  return sqrt( creal_double(d) );
 }
 
-
-#ifdef CUDA_PIECE_BENCHMARK
-// Benchmark of one step of the outer FGMRES on the GPU without the preconditioner (step E, build with
-// -DCUDA_PIECE_BENCHMARK), called by one thread after the solve (the buffers are overwritten):
-// v_j (double) -> float input of the V-cycle, float output of the V-cycle -> z_j (double), w = D z_j,
-// classical Gram-Schmidt against v_0..v_j, norm and scaling. Returns the median over reps of the mean
-// time of the m steps of a restart, in ms; timed with MPI_Wtime after a barrier.
-extern "C" double cuda_outer_fgmres_step_bench( gmres_double_struct *p, level_struct *l, int reps ) {
-
-  outer_buffers( p, l );
-  const int m = p->restart_length, nsv = l->num_lattice_site_var;
-  const size_t vl = (size_t)l->inner_vector_size, n_sites = (size_t)l->num_inner_lattice_sites;
-  const cu_cmplx_double one = make_cuDoubleComplex(1,0), zero = make_cuDoubleComplex(0,0),
-                        mone = make_cuDoubleComplex(-1,0);
-  interpolation_float_struct *is = &(l->is_float);
-  std::vector<cu_cmplx_double> hv( vl ), hloc( m+1 ), hglob( m+1 );
-  std::vector<cu_cmplx_float> hf( vl );
-  for ( size_t i=0; i<vl; i++ ) {
-    double a = (double)rand()/RAND_MAX - 0.5, b = (double)rand()/RAND_MAX - 0.5;
-    hv[i] = make_cuDoubleComplex( a/sqrt((double)vl), b/sqrt((double)vl) );
-    hf[i] = make_cuFloatComplex( (float)a, (float)b );
+// z += sum_i alpha[i] V[i], i < n, in groups of CUDA_MULTI_SAXPY_MAX vectors
+static void outer_multi_saxpy( cuda_vector_double z, cuda_vector_double *V, const cd_outer *alpha, int n,
+                               level_struct *l, cudaStream_t *streams ) {
+  cu_cmplx_double a[CUDA_MULTI_SAXPY_MAX];
+  for ( int i0=0; i0<n; i0+=CUDA_MULTI_SAXPY_MAX ) {
+    int k = ( n-i0 < CUDA_MULTI_SAXPY_MAX ) ? n-i0 : CUDA_MULTI_SAXPY_MAX;
+    for ( int i=0; i<k; i++ ) a[i] = make_cuDoubleComplex( alpha[i0+i].real(), alpha[i0+i].imag() );
+    cuda_vector_double_multi_saxpy( z, V+i0, a, k, 0, og.vl, l, _CUDA_SYNC, 0, streams );
   }
-  for ( int j=0; j<=m; j++ )
-    CUDA_CHECK_OUTER( cudaMemcpy( og.V + (size_t)j*vl, hv.data(), vl*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
-  CUDA_CHECK_OUTER( cudaMemcpy( is->phi_gpu, hf.data(), vl*sizeof(cu_cmplx_float), cudaMemcpyHostToDevice ) );
-
-  std::vector<double> ts;
-  for ( int r=0; r<reps; r++ ) {
-    MPI_Barrier( g.comm_cart );
-    double t0 = MPI_Wtime();
-    for ( int j=0; j<m; j++ ) {
-      outer_trans_float_kernel<<< minGridSizeForN( vl, 256 ), 256 >>>( is->eta_gpu, og.V + (size_t)j*vl, og.tt,
-                                                                       n_sites, nsv );
-      cu_cmplx_double *zj = og.Z + (size_t)j*vl, *w = og.V + (size_t)(j+1)*vl;
-      outer_trans_back_float_kernel<<< minGridSizeForN( vl, 256 ), 256 >>>( zj, is->phi_gpu, og.tt, n_sites, nsv );
-      CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
-      outer_apply_D( w, zj, p->op, l, no_threading );
-      CUBLAS_CHECK_OUTER( cublasZgemv( og.h, CUBLAS_OP_C, (int)vl, j+1, &one, og.V, (int)vl, w, 1, &zero, og.hd, 1 ) );
-      CUDA_CHECK_OUTER( cudaMemcpy( hloc.data(), og.hd, (j+1)*sizeof(cu_cmplx_double), cudaMemcpyDeviceToHost ) );
-      if ( g.num_processes > 1 )
-        MPI_Allreduce( hloc.data(), hglob.data(), j+1, MPI_COMPLEX_double, MPI_SUM, g.comm_cart );
-      else
-        hglob = hloc;
-      CUDA_CHECK_OUTER( cudaMemcpy( og.hd, hglob.data(), (j+1)*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
-      CUBLAS_CHECK_OUTER( cublasZgemv( og.h, CUBLAS_OP_N, (int)vl, j+1, &mone, og.V, (int)vl, og.hd, 1, &one, w, 1 ) );
-      double hn = outer_norm( w, vl );
-      if ( hn > 1e-15 ) { double s = 1.0/hn; CUBLAS_CHECK_OUTER( cublasZdscal( og.h, (int)vl, &s, w, 1 ) ); }
-    }
-    CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
-    ts.push_back( 1e3*( MPI_Wtime() - t0 )/m );
-  }
-  std::sort( ts.begin(), ts.end() );
-  return ts[ ts.size()/2 ];
 }
-#endif
 
 
 extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l, struct Thread *threading ) {
 
   // master-only state (the other threads only take part in the V-cycle)
-  static std::vector<cd_outer> H, gam, sn, cs, y;
-  static std::vector<cu_cmplx_double> hloc, hglob;
+  static std::vector<cd_outer> H, gam, sn, cs, y, h;
+  static std::vector<complex_double> hd;
   static double norm_r0, gamma_jp1, t0, t1;
   static int iter, j, res;
+  // NVTX ranges (built without -DNVTX_DISABLE): the whole outer FGMRES and every outer iteration
+  static RangeHandleType range_solver, range_iter;
 
   const int m = p->restart_length;
-  const size_t vl = (size_t)l->inner_vector_size, n_sites = (size_t)l->num_inner_lattice_sites;
+  const size_t n_sites = (size_t)l->num_inner_lattice_sites;
   const int nsv = l->num_lattice_site_var;
-  const cu_cmplx_double one = make_cuDoubleComplex(1,0), zero = make_cuDoubleComplex(0,0),
-                        mone = make_cuDoubleComplex(-1,0);
-  const double minus1 = -1.0;
-  auto Hc = [&]( int col, int row ) -> cd_outer& { return H[ (size_t)col*(m+1) + row ]; };   // H[j][i] of fgmres
+  auto Hc = [&]( int col, int row ) -> cd_outer& { return H[ (size_t)col*(m+1) + row ]; };   // p->H[col][row]
+  cudaStream_t stream = CU_STREAM_PER_THREAD;
+  cudaStream_t* const streams = &stream;
 
   START_LOCKED_MASTER(threading)
+  range_solver = startProfilingRange("outer FGMRES (GPU)");
   if ( p->timing || p->print ) prof_init( l );
   t0 = MPI_Wtime();
 #if defined(TRACK_RES) && !defined(WILSON_BENCHMARK)
   if ( p->print && g.print > 0 ) printf0("+----------------------------------------------------------+\n");
 #endif
   outer_buffers( p, l );
-  H.assign( (size_t)m*(m+1), 0 ); gam.assign( m+1, 0 ); sn.assign( m, 0 ); cs.assign( m, 0 ); y.assign( m, 0 );
-  hloc.resize( m+1 ); hglob.resize( m+1 );
+  H.assign( (size_t)m*(m+1), 0 ); gam.assign( m+1, 0 ); sn.assign( m, 0 ); cs.assign( m, 0 );
+  y.assign( m, 0 ); h.assign( m+1, 0 ); hd.resize( m+1 );
   norm_r0 = 1; gamma_jp1 = 1; iter = 0; j = -1;
   og.finish = 0;
   // the only host-to-device copies of fine vectors in the solve
-  CUDA_CHECK_OUTER( cudaMemcpy( og.b, p->b, vl*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
+  cuda_vector_double_copy( og.b, p->b, 0, og.vl, l, _H2D, _CUDA_SYNC, 0, streams );
   if ( !p->initial_guess_zero )
-    CUDA_CHECK_OUTER( cudaMemcpy( og.x, p->x, vl*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
+    cuda_vector_double_copy( og.x, p->x, 0, og.vl, l, _H2D, _CUDA_SYNC, 0, streams );
   END_LOCKED_MASTER(threading)
   SYNC_MASTER_TO_ALL(threading)
 
@@ -249,35 +194,34 @@ extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l
     START_LOCKED_MASTER(threading)
     if ( ol == 0 && p->initial_guess_zero ) {
       res = _NO_RES;
-      CUBLAS_CHECK_OUTER( cublasZcopy( og.h, (int)vl, og.b, 1, og.w, 1 ) );            // r = b
+      cuda_vector_double_copy( og.w, og.b, 0, og.vl, l, _D2D, _CUDA_SYNC, 0, streams );        // r = b
     } else {
       res = _RES;
-      outer_apply_D( og.w, og.x, p->op, l, threading );                                  // w = D x
-      CUBLAS_CHECK_OUTER( cublasZdscal( og.h, (int)vl, &minus1, og.w, 1 ) );
-      CUBLAS_CHECK_OUTER( cublasZaxpy( og.h, (int)vl, &one, og.b, 1, og.w, 1 ) );       // r = b - D x
+      outer_apply_D( og.w, og.x, p->op, l, threading );                                       // w = D x
+      cuda_vector_double_minus( og.w, og.b, og.w, 0, og.vl, l, _CUDA_SYNC, 0, streams );      // r = b - D x
     }
-    double gamma0 = outer_norm( og.w, vl );
+    double gamma0 = outer_norm( og.w, p, l, threading );
     gam[0] = gamma0;
     if ( ol == 0 ) norm_r0 = gamma0;
-    CUBLAS_CHECK_OUTER( cublasZcopy( og.h, (int)vl, og.w, 1, og.V, 1 ) );                // v_0 = r / gamma_0
-    double s0 = 1.0/gamma0;
-    CUBLAS_CHECK_OUTER( cublasZdscal( og.h, (int)vl, &s0, og.V, 1 ) );
+    cuda_vector_double_scale( og.V[0], og.w, make_cuDoubleComplex( 1.0/gamma0, 0 ), 0, og.vl, l,
+                              _CUDA_SYNC, 0, streams );                                       // v_0 = r / gamma_0
     og.stop_restart = 0;
     END_LOCKED_MASTER(threading)
     SYNC_MASTER_TO_ALL(threading)
 
     for ( int il=0; il<m && og.finish==0 && og.stop_restart==0; il++ ) {
 
-      // Z_j = M V_j: V_j to the depth-0 interpolation buffer eta_gpu (float, Schwarz ordering)
+      // Z_j = M V_j: V_j into the depth-0 restriction buffer eta_gpu (float, Schwarz ordering)
       START_LOCKED_MASTER(threading)
+      range_iter = startProfilingRange("outer FGMRES iteration");
       j = il; iter++;
       interpolation_float_struct *is = &(l->is_float);
-      outer_trans_float_kernel<<< minGridSizeForN( vl, 256 ), 256 >>>( is->eta_gpu, og.V + (size_t)j*vl, og.tt,
-                                                                       n_sites, nsv );
-      CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
-      is->eta_resident_host = l->sbuf_float[0];
-      is->keep_phi_result = 1;
+      outer_trans_float_kernel<<< minGridSizeForN( og.vl, 256 ), 256 >>>( is->eta_gpu, og.V[j], og.tt, n_sites, nsv );
+      cuda_safe_call( cudaDeviceSynchronize() );
+      is->eta_preloaded_host = l->sbuf_float[0];
+      is->keep_phi_on_gpu = 1;
       is->phi_result_host = NULL;
+      is->defer_phi_copy = 1;
       END_LOCKED_MASTER(threading)
       SYNC_MASTER_TO_ALL(threading)
 
@@ -286,33 +230,31 @@ extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l
       START_LOCKED_MASTER(threading)
       interpolation_float_struct *is = &(l->is_float);
       if ( is->phi_result_host != l->sbuf_float[1] ) {
-        // the smoother did not leave its result on the GPU (CPU fallback): take it from the host
-        CUDA_CHECK_OUTER( cudaMemcpy( is->phi_gpu, l->sbuf_float[1], vl*sizeof(cu_cmplx_float),
-                                      cudaMemcpyHostToDevice ) );
+        // the smoother did not leave its result on the GPU (it ran on the host vectors)
+        cuda_safe_call( cudaMemcpy( is->phi_gpu, l->sbuf_float[1], (size_t)og.vl*sizeof(cu_cmplx_float),
+                                    cudaMemcpyHostToDevice ) );
       }
-      is->keep_phi_result = 0; is->phi_result_host = NULL;
-      is->eta_resident_host = NULL; is->eta_stale_host = NULL;
-      cu_cmplx_double *zj = og.Z + (size_t)j*vl, *w = og.V + (size_t)(j+1)*vl;
-      outer_trans_back_float_kernel<<< minGridSizeForN( vl, 256 ), 256 >>>( zj, is->phi_gpu, og.tt, n_sites, nsv );
-      CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
+      is->keep_phi_on_gpu = 0; is->phi_result_host = NULL; is->defer_phi_copy = 0;
+      is->eta_preloaded_host = NULL; is->eta_host_stale = NULL;
+      outer_trans_back_float_kernel<<< minGridSizeForN( og.vl, 256 ), 256 >>>( og.Z[j], is->phi_gpu, og.tt, n_sites, nsv );
+      cuda_safe_call( cudaDeviceSynchronize() );
 
-      outer_apply_D( w, zj, p->op, l, threading );                                       // w = D Z_j
+      cuda_vector_double w = og.V[j+1];
+      outer_apply_D( w, og.Z[j], p->op, l, threading );                                       // w = D Z_j
 
-      // h_i = <v_i, w>, i = 0..j, reduced over the processes; w = w - sum_i h_i v_i
-      CUBLAS_CHECK_OUTER( cublasZgemv( og.h, CUBLAS_OP_C, (int)vl, j+1, &one, og.V, (int)vl, w, 1, &zero, og.hd, 1 ) );
-      CUDA_CHECK_OUTER( cudaMemcpy( hloc.data(), og.hd, (j+1)*sizeof(cu_cmplx_double), cudaMemcpyDeviceToHost ) );
-      if ( g.num_processes > 1 )
-        MPI_Allreduce( hloc.data(), hglob.data(), j+1, MPI_COMPLEX_double, MPI_SUM, g.comm_cart );
-      else
-        hglob = hloc;
-      for ( int i=0; i<=j; i++ ) Hc(j,i) = cd_outer( hglob[i].x, hglob[i].y );
-      CUDA_CHECK_OUTER( cudaMemcpy( og.hd, hglob.data(), (j+1)*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
-      CUBLAS_CHECK_OUTER( cublasZgemv( og.h, CUBLAS_OP_N, (int)vl, j+1, &mone, og.V, (int)vl, og.hd, 1, &one, w, 1 ) );
+      // h_i = <v_i, w>, i = 0..j (reduced over the processes); w = w - sum_i h_i v_i
+      cuda_global_inner_product_double( og.V, w, hd.data(), j+1, 0, og.vl, p, l, threading );
+      for ( int i=0; i<=j; i++ ) {
+        Hc(j,i) = cd_outer( creal_double(hd[i]), cimag_double(hd[i]) );
+        h[i] = -Hc(j,i);
+      }
+      outer_multi_saxpy( w, og.V, h.data(), j+1, l, streams );
 
       // h_{j+1} = ||w||, v_{j+1} = w / h_{j+1}
-      double hn = outer_norm( w, vl );
+      double hn = outer_norm( w, p, l, threading );
       Hc(j,j+1) = hn;
-      if ( hn > 1e-15 ) { double s = 1.0/hn; CUBLAS_CHECK_OUTER( cublasZdscal( og.h, (int)vl, &s, w, 1 ) ); }
+      if ( hn > 1e-15 )
+        cuda_vector_double_scale( w, w, make_cuDoubleComplex( 1.0/hn, 0 ), 0, og.vl, l, _CUDA_SYNC, 0, streams );
 
       if ( std::abs( Hc(j,j+1) ) > p->tol/10 ) {
         // Givens rotations (qr_update_double)
@@ -340,23 +282,21 @@ extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l
         og.finish = 1;
         og.stop_restart = 1;
       }
+      endProfilingRange( range_iter );
       END_LOCKED_MASTER(threading)
       SYNC_MASTER_TO_ALL(threading)
     }
 
-    // x = x + Z y (x = Z y after a zero initial guess): compute_solution_double
+    // x = x + Z y (x = Z y after a zero initial guess), as compute_solution_double
     START_LOCKED_MASTER(threading)
     for ( int i=j; i>=0; i-- ) {
       y[i] = gam[i];
       for ( int k=i+1; k<=j; k++ ) y[i] -= Hc(k,i)*y[k];
       y[i] /= Hc(i,i);
     }
-    for ( int i=0; i<=j; i++ ) hglob[i] = make_cuDoubleComplex( y[i].real(), y[i].imag() );
-    CUDA_CHECK_OUTER( cudaMemcpy( og.hd, hglob.data(), (j+1)*sizeof(cu_cmplx_double), cudaMemcpyHostToDevice ) );
-    int add = ( res == _NO_RES ) ? ol : 1;
-    CUBLAS_CHECK_OUTER( cublasZgemv( og.h, CUBLAS_OP_N, (int)vl, j+1, &one, og.Z, (int)vl, og.hd, 1,
-                                     add ? &one : &zero, og.x, 1 ) );
-    CUDA_CHECK_OUTER( cudaDeviceSynchronize() );
+    if ( res == _NO_RES && ol == 0 )
+      cuda_vector_double_define( og.x, make_cuDoubleComplex( 0, 0 ), 0, og.vl, l, _CUDA_SYNC, 0, streams );
+    outer_multi_saxpy( og.x, og.Z, y.data(), j+1, l, streams );
     END_LOCKED_MASTER(threading)
     SYNC_MASTER_TO_ALL(threading)
   }
@@ -365,14 +305,15 @@ extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l
   t1 = MPI_Wtime(); g.total_time = t1-t0; g.iter_count = iter; g.norm_res = gamma_jp1/norm_r0;
   double beta = gamma_jp1;
 #ifdef FGMRES_RESTEST
-  // exact residual, on the GPU
-  outer_apply_D( og.w, og.x, p->op, l, threading );
-  CUBLAS_CHECK_OUTER( cublasZdscal( og.h, (int)vl, &minus1, og.w, 1 ) );
-  CUBLAS_CHECK_OUTER( cublasZaxpy( og.h, (int)vl, &one, og.b, 1, og.w, 1 ) );
-  beta = outer_norm( og.w, vl );
+  if ( p->print ) {
+    // exact residual, on the GPU
+    outer_apply_D( og.w, og.x, p->op, l, threading );
+    cuda_vector_double_minus( og.w, og.b, og.w, 0, og.vl, l, _CUDA_SYNC, 0, streams );
+    beta = outer_norm( og.w, p, l, threading );
+  }
 #endif
   // the only device-to-host copy of a fine vector in the solve
-  CUDA_CHECK_OUTER( cudaMemcpy( p->x, og.x, vl*sizeof(cu_cmplx_double), cudaMemcpyDeviceToHost ) );
+  cuda_vector_double_copy( p->x, og.x, 0, og.vl, l, _D2H, _CUDA_SYNC, 0, streams );
 
   if ( p->print ) {
     g.norm_res = beta/norm_r0;
@@ -394,11 +335,12 @@ extern "C" int cuda_outer_fgmres_double( gmres_double_struct *p, level_struct *l
     printf0("|  consumed core minutes*: %-8.2le (solve only)           |\n", ((t1-t0)*g.num_processes*MAX(1,threading->n_core))/60.0 );
     printf0("|    max used mem/MPIproc: %-8.2le GB                     |\n", g.max_storage/1024.0 );
     printf0("|        max used mem/GPU: %-8.2le GB                     |\n", g.max_gpu_storage/1024.0 );
-    printf0("|  outer FGMRES on the GPU: %-3s                            |\n", "yes" );
+    printf0("|           outer FGMRES on the GPU                        |\n" );
     printf0("+----------------------------------------------------------+\n");
     printf0("*: only correct if #MPIprocs*#threads == #CPUs\n\n");
   }
   if ( p->timing || p->print ) prof_print( l );
+  endProfilingRange( range_solver );
   END_LOCKED_MASTER(threading)
   SYNC_MASTER_TO_ALL(threading)
 

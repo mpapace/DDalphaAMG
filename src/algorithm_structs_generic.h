@@ -21,13 +21,14 @@
 
 typedef struct
 {
-    config_PRECISION D, clover, oe_clover;
+    config_PRECISION D, clover, oe_clover, clover_oo_copy;
 #ifdef CUDA_OPT
     cuda_config_PRECISION
         /** Self coupling coefficients on the GPU. */
         clover_gpu,
+        clover_gpu_oo_copy,
         /** Self coupling coefficients in componentwise ordering on the GPU.*/
-        clover_componentwise_gpu,
+        clover_componentwise_gpu, clover_componentwise_gpu_oo_copy,
         /** Neighbor coupling coefficients on the GPU. */
         D_gpu;
     /** Neighbor coupling coefficients in componentwise ordering on the GPU.
@@ -238,7 +239,7 @@ typedef struct
 
     cuda_vector_PRECISION b_gpu, b_componentwise_gpu, x_gpu,
                           x_componentwise_gpu, w_componentwise_gpu,
-                          r_componentwise_gpu;
+                          r_componentwise_gpu, *V_componentwise_gpu;
 #endif
     complex_PRECISION **H, *y, *gamma, *c, *s, shift;
     config_PRECISION *D, *clover;
@@ -277,6 +278,13 @@ typedef struct
 #if defined(SINGLE_ALLREDUCE_ARNOLDI) && defined(PIPELINED_ARNOLDI)
     int syst_size;
     vector_PRECISION *Va, *Za;
+#endif
+
+#ifdef CUDA_OPT
+  int gpu_dotprods_memsize;
+  vector_PRECISION *gpu_dotprods_partial_sums;
+  cuda_vector_PRECISION *gpu_dotprods_dev_partial_sums;
+  vector_PRECISION gpu_dotprods_global_sums;
 #endif
 } gmres_PRECISION_struct;
 
@@ -324,17 +332,25 @@ typedef struct
     vector_PRECISION *test_vector, *interpolation, *bootstrap_vector, tmp;
     complex_PRECISION *op, *eigenvalues, *bootstrap_eigenvalues;
 #ifdef CUDA_OPT
-    cuda_vector_PRECISION op_gpu, phi_gpu, phi_c_gpu, eta_gpu; // device buffers for restriction and interpolation
-    vector_PRECISION phi_gpu_host, eta_gpu_host; // host vectors whose current copy is in phi_gpu / eta_gpu (or NULL)
-    cuda_vector_PRECISION oe_b_gpu, oe_x_gpu, oe_chunk_gpu; // depth-0 smoother, odd-even layout (component-wise)
-    int *oe_perm_gpu;                                        // Schwarz site index -> odd-even site index
-    cuda_vector_PRECISION oe_V_gpu, oe_h_gpu; int oe_V_cols; // GMRES basis and small vector on the GPU
-    int defer_phi_dtoh;              // set before an interpolation: leave phi on the GPU only
-    vector_PRECISION phi_stale_host; // host vector whose current values are only in phi_gpu (or NULL)
-    vector_PRECISION eta_resident_host; // set by the outer FGMRES on the GPU: eta_gpu already holds this vector
-    vector_PRECISION eta_stale_host;    // host vector whose current values are only in eta_gpu (or NULL)
-    int keep_phi_result;                // set by the outer FGMRES on the GPU: the smoother leaves phi in phi_gpu
-    vector_PRECISION phi_result_host;   // host vector whose result was left in phi_gpu by the smoother (or NULL)
+    cuda_vector_PRECISION op_gpu, phi_gpu, phi_c_gpu; // device buffers for restriction
+    // depth 0: the input of the last restriction (eta_gpu) and the result of the last
+    // interpolation (phi_gpu) stay on the GPU for the smoother; *_gpu_host is the host vector
+    // whose copy they hold (NULL: none). oe_perm_gpu: block site -> odd-even site.
+    cuda_vector_PRECISION eta_gpu;
+    vector_PRECISION phi_gpu_host, eta_gpu_host;
+    int *oe_perm_gpu;
+    // outer FGMRES on the GPU: eta_preloaded_host is the host vector whose values the caller has
+    // already written into eta_gpu (the restriction then does not copy it); eta_host_stale is the
+    // host vector whose current values are only in eta_gpu (NULL: none)
+    vector_PRECISION eta_preloaded_host, eta_host_stale;
+    // outer FGMRES on the GPU: with keep_phi_on_gpu set, the depth-0 smoother on the GPU leaves its
+    // result in phi_gpu and does not copy it to the host; phi_result_host is then that host vector
+    int keep_phi_on_gpu;
+    vector_PRECISION phi_result_host;
+    // outer FGMRES on the GPU: with defer_phi_copy set, the next interpolation (phi = P phi_c) leaves
+    // its result only in phi_gpu; phi_host_stale is then the host vector that is not up to date
+    int defer_phi_copy;
+    vector_PRECISION phi_host_stale;
 #endif
 } interpolation_PRECISION_struct;
 

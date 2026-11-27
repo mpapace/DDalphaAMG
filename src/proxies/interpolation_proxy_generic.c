@@ -88,23 +88,7 @@ static void interp_bench_PRECISION( int op, vector_PRECISION out, vector_PRECISI
   SYNC_MASTER_TO_ALL(threading)
 
   double t_cpu = interp_bench_time_PRECISION( op, 1, in, l, threading );
-
-  // the GPU calls of the benchmark run with the vectors on the host: the flags of the depth-0
-  // GPU residency (phi left on the GPU, eta already on the GPU) are kept for the production call
-  int defer_phi_dtoh = 0;
-  vector_PRECISION eta_resident_host = NULL;
-  START_MASTER(threading)
-  defer_phi_dtoh    = l->is_PRECISION.defer_phi_dtoh;
-  eta_resident_host = l->is_PRECISION.eta_resident_host;
-  l->is_PRECISION.defer_phi_dtoh    = 0;
-  l->is_PRECISION.eta_resident_host = NULL;
-  END_MASTER(threading)
-  SYNC_MASTER_TO_ALL(threading)
   double t_gpu = interp_bench_time_PRECISION( op, 0, in, l, threading );
-  START_MASTER(threading)
-  l->is_PRECISION.defer_phi_dtoh    = defer_phi_dtoh;
-  l->is_PRECISION.eta_resident_host = eta_resident_host;
-  END_MASTER(threading)
 
   START_MASTER(threading)
   double t[4];

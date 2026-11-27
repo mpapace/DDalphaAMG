@@ -20,9 +20,7 @@
  */
 
 #include "main.h"
-#ifdef CUDA_OPT
-#include "gpu/cuda_outer_fgmres.h"
-#endif
+#include "proxies/linsolve_proxy.h"
 
 void rhs_define( vector_double rhs, level_struct *l, struct Thread *threading ) {
   
@@ -87,12 +85,7 @@ int wilson_driver( vector_double solution, vector_double source, level_struct *l
   } else if ( g.mixed_precision == 2 ) {
     iter = fgmres_MP( &(g.p_MP), l, threading );
   } else {
-#ifdef CUDA_OPT
-    if ( cuda_outer_fgmres_applicable( &(g.p), l ) )
-      iter = cuda_outer_fgmres_double( &(g.p), l, threading );   // fine vectors stay on the GPU
-    else
-#endif
-    iter = fgmres_double( &(g.p), l, threading );
+    iter = outer_fgmres_double( &(g.p), l, threading );
   }
   vector_double_copy( solution, sol, start, end, l );
 #ifdef WILSON_BENCHMARK
